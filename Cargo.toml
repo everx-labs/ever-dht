@@ -1,0 +1,29 @@
+[package]
+edition = "2018"
+build = "./common/build/build.rs"
+name = "dht"
+version = "0.0.1"
+description = "DHT protocol library"
+
+[dependencies]
+base64 = "0.11.0"
+failure = "0.1.6"
+hex = "^0"
+lockfree = "0.5.1"
+log = "0.4.8"
+rand = "0.7.2"
+sha2 = "0.8.0"
+tokio = { version = "0.2.5", features = ["rt-threaded", "stream", "tcp", "udp"] }
+
+adnl = { git = "https://github.com/tonlabs/ton-labs-adnl.git", features = ["node"] }
+overlay = { git = "https://github.com/tonlabs/ton-labs-overlay.git" }
+ton_api = { git = "https://github.com/tonlabs/ton-labs-tl.git", package = "ton_api" }
+ton_types = { git = "https://github.com/tonlabs/ton-labs-types.git" }
+
+[dev-dependencies]
+arrayref = "0.3.5"
+ed25519-dalek = "1.0.0-pre.3"
+log4rs = "0.8.3"
+
+
+
