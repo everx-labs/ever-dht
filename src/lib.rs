@@ -45,7 +45,7 @@ macro_rules! sign {
             buf.truncate(0);
             buf.extend_from_slice(&signature);
             let mut data = data.only();
-            mem::replace(&mut data.signature.0, buf);
+            data.signature.0 = buf;
             data
         }
     }
@@ -358,13 +358,13 @@ impl DhtNode {
     }
 
     /// Store own IP address
-    pub async fn store_ip_address(dht: &Arc<Self>) -> Result<bool> {
+    pub async fn store_ip_address(dht: &Arc<Self>, key: &Arc<KeyOption>) -> Result<bool> {
         log::debug!(target: TARGET, "Storing key ID {}", dht.node_key.id());
-        let value = serialize(&dht.adnl.build_address_list(0)?.into_boxed())?;
+        let value = serialize(&dht.adnl.build_address_list()?.into_boxed())?;
         Self::store_value(
             dht,
             Self::dht_key_from_key_id(dht.node_key.id(), "address"),
-            dht.sign_value("address", &value[..])?,
+            Self::sign_value("address", &value[..], key)?,
             |object| object.is::<AddressListBoxed>(),
             false, 
             |mut objects| {
@@ -724,34 +724,34 @@ impl DhtNode {
         self.adnl.query_with_prefix(Some(&self.query_prefix[..]), query, &peers, None).await
     } 
     
-    fn sign_key_description(&self, name: &str) -> Result<DhtKeyDescription> {
+    fn sign_key_description(name: &str, key: &Arc<KeyOption>) -> Result<DhtKeyDescription> {
         let key_description = DhtKeyDescription {
-            id: self.node_key.into_tl_public_key()?,
-            key: Self::dht_key_from_key_id(self.node_key.id(), name),
+            id: key.into_tl_public_key()?,
+            key: Self::dht_key_from_key_id(key.id(), name),
             signature: ton::bytes::default(),
             update_rule: UpdateRule::Dht_UpdateRule_Signature
         };
-        Ok(sign!(key_description, self.node_key))
+        Ok(sign!(key_description, key))
     }    
 
     fn sign_local_node(&self) -> Result<Node> {
         let local_node = Node {
             id: self.node_key.into_tl_public_key()?,
-            addr_list: self.adnl.build_address_list(0)?,
+            addr_list: self.adnl.build_address_list()?,
             signature: ton::bytes::default(),
             version: Version::get()
         };
         Ok(sign!(local_node, self.node_key))
     }
 
-    fn sign_value(&self, name: &str, value: &[u8]) -> Result<DhtValue> {
+    fn sign_value(name: &str, value: &[u8], key: &Arc<KeyOption>) -> Result<DhtValue> {
         let value = DhtValue {
-            key: self.sign_key_description(name)?,
+            key: Self::sign_key_description(name, key)?,
             ttl: Version::get() + Self::TIMEOUT_VALUE,
             signature: ton::bytes::default(),
             value: ton::bytes(value.to_vec())
         };
-        Ok(sign!(value, self.node_key))
+        Ok(sign!(value, key))
     }
 
     async fn store_value(
