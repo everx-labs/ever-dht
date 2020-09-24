@@ -122,10 +122,10 @@ impl DhtNode {
             storage: lockfree::map::Map::new(),
         };
         let query = DhtQuery { 
-            node: ret.sign_local_node()? 
+            node: ret.sign_local_node()?
         };
         serialize_inplace(&mut ret.query_prefix, &query)?;
-        Ok(Arc::new(ret))
+        Ok(Arc::new(ret))                                             
     }
 
     /// Add DHT peer 
@@ -293,6 +293,17 @@ impl DhtNode {
         Ok(ret)
     }
 
+    /// First DHT peer
+    pub fn get_known_peer(&self, iter: &mut Option<AddressCacheIterator>) -> Option<Arc<KeyId>> {
+        if let Some(iter) = iter {
+            self.known_peers.next(iter)
+        } else {
+            let (new_iter, first) = self.known_peers.first();
+            iter.replace(new_iter);
+            first
+        }
+    }
+
     /// Get known DHT nodes
     pub fn get_known_nodes(&self, limit: usize) -> Result<Vec<Node>> {
         if limit == 0 {
@@ -359,11 +370,11 @@ impl DhtNode {
 
     /// Store own IP address
     pub async fn store_ip_address(dht: &Arc<Self>, key: &Arc<KeyOption>) -> Result<bool> {
-        log::debug!(target: TARGET, "Storing key ID {}", dht.node_key.id());
+        log::debug!(target: TARGET, "Storing key ID {}", key.id());
         let value = serialize(&dht.adnl.build_address_list()?.into_boxed())?;
         Self::store_value(
             dht,
-            Self::dht_key_from_key_id(dht.node_key.id(), "address"),
+            Self::dht_key_from_key_id(key.id(), "address"),
             Self::sign_value("address", &value[..], key)?,
             |object| object.is::<AddressListBoxed>(),
             false, 
@@ -464,6 +475,13 @@ impl DhtNode {
         all: bool,
         iter: &mut Option<AddressCacheIterator>
     ) -> Result<Vec<(DhtKeyDescription, TLObject)>> {
+        let mut current = dht.get_known_peer(iter);
+        let mut ret = Vec::new();
+        let iter = if let Some(ref mut iter) = iter {
+            iter
+        } else {
+            return Ok(ret)
+        };
         let key = hash(key)?;
         let query = TLObject::new(
             FindValue { 
@@ -471,7 +489,8 @@ impl DhtNode {
                 k: 6 
             }
         );
-        let mut current = None; 
+/*        
+None; 
         let iter = iter.get_or_insert_with(
             || {
                 let (iter, first) = dht.known_peers.first();
@@ -480,11 +499,15 @@ impl DhtNode {
             } 
         );
         let current = current.get_or_insert_with(|| dht.known_peers.next(iter)); 
-        let key = KeyId::from_data(key); 
+*/
+        let key = Arc::new(key); 
         let query = Arc::new(query);
         let (wait, mut queue_reader) = Wait::new();  
-        let mut ret = Vec::new();
-        log::debug!(target: TARGET, "FindValue {} query", key);
+        log::debug!(
+            target: TARGET, 
+            "FindValue with DHT key ID {} query", 
+            base64::encode(&key[..])
+        );
         loop {
             while let Some(peer) = current {
                 let dht_cloned = dht.clone();
@@ -504,15 +527,16 @@ impl DhtNode {
                         } 
                     } 
                 );
-                *current = dht.known_peers.next(iter);
+                current = dht.known_peers.next(iter);
+//                *current = dht.known_peers.next(iter);
                 if reqs >= Self::MAX_TASKS {
                     break;
                 } 
             } 
             log::debug!(
                 target: TARGET, 
-                "FindValue {} query, {} parallel reqs, iter {:?}", 
-                key, wait.count(), iter
+                "FindValue with DHT key ID {} query, {} parallel reqs, iter {:?}", 
+                base64::encode(&key[..]), wait.count(), iter
             );
             let mut finished = false; 
             loop {
@@ -533,7 +557,8 @@ impl DhtNode {
                 break
             } 
             if current.is_none() {
-                *current = dht.known_peers.given(iter);
+                current = dht.known_peers.given(iter);
+//                *current = dht.known_peers.given(iter);
             }                
         }
         Ok(ret)
@@ -542,7 +567,7 @@ impl DhtNode {
     fn process_find_node(&self, query: &FindNode) -> Result<Nodes> {
         let key1 = self.node_key.id().data();
         let key2 = get256(&query.key);
-        let mut dist = 0;
+        let mut dist = 0u8;
         let mut ret = Vec::new();
         for i in 0..32 {
             if ret.len() == query.k as usize {
@@ -552,11 +577,11 @@ impl DhtNode {
             let mut xor = key1[i] ^ key2[i];
             while xor != 0 {
                 if (xor & 0xF0) == 0 {
-                    subdist += 4;
+                    subdist = subdist.saturating_add(4);
                     xor <<= 4;
                 } else {
                     let shift = Self::BITS[(xor >> 4) as usize];
-                    subdist += shift;
+                    subdist = subdist.saturating_add(shift);
                     if let Some(bucket) = self.buckets.get(&subdist) {
                         for node in bucket.val().iter() {         
                             ret.push(node.val().clone());
@@ -566,13 +591,13 @@ impl DhtNode {
                         }
                     }
                     xor <<= shift + 1;
-                    subdist += 1;
+                    subdist = subdist.saturating_add(1);
                 }
                 if ret.len() == query.k as usize {
                     break
                 }
             }
-            dist += 8;
+            dist = dist.saturating_add(8);
         }
         let ret = Nodes {
             nodes: ret.into()
@@ -844,7 +869,7 @@ impl DhtNode {
         &self, 
         peer: &Arc<KeyId>, 
         query: &Arc<TLObject>,
-        key: &Arc<KeyId>,
+        key: &Arc<DhtKeyId>,
         check: impl Fn(&TLObject) -> bool
     ) -> Result<Option<(DhtKeyDescription, TLObject)>> {
         let answer = self.query(peer, query).await?;
@@ -855,8 +880,8 @@ impl DhtNode {
                     let value = value.value.only();
                     log::debug!(
                         target: TARGET, 
-                        "Found value for key {}: {:?}/{:?}", 
-                        key, value.key, value.value
+                        "Found value for DHT key ID {}: {:?}/{:?}", 
+                        base64::encode(&key[..]), value.key, value.value
                     );
                     let object = deserialize(&value.value.0)?;
                     if check(&object) {
@@ -872,8 +897,8 @@ impl DhtNode {
                     let nodes = nodes.nodes.nodes;
                     log::debug!(
                         target: TARGET, 
-                        "Value not found on {} for key {}, suggested {} other nodes", 
-                        peer, key, nodes.len()
+                        "Value not found on {} for DHT key ID {}, suggested {} other nodes",
+                        peer, base64::encode(&key[..]), nodes.len()
                     );
                     for node in nodes.iter() {          
                         self.add_peer(node)?;
@@ -881,7 +906,11 @@ impl DhtNode {
                 }
             }
         } else {
-            log::debug!(target: TARGET, "No answer from {} to FindValue {} query", peer, key);
+            log::debug!(
+                target: TARGET, 
+                "No answer from {} to FindValue with DHT key ID {} query", 
+                peer, base64::encode(&key[..])
+            );
         }
         Ok(None) 
     }
@@ -921,7 +950,7 @@ impl Subscriber for DhtNode {
             Err(object) => object
         };
         let object = match object.downcast::<GetSignedAddressList>() {
-            Ok(_) => return QueryResult::consume_boxed(deserialize(&self.query_prefix)?),
+            Ok(_) => return QueryResult::consume(self.get_signed_node()?),
             Err(object) => object
         };
         match object.downcast::<Store>() {
