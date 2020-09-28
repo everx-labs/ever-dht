@@ -371,7 +371,7 @@ impl DhtNode {
     /// Store own IP address
     pub async fn store_ip_address(dht: &Arc<Self>, key: &Arc<KeyOption>) -> Result<bool> {
         log::debug!(target: TARGET, "Storing key ID {}", key.id());
-        let value = serialize(&dht.adnl.build_address_list()?.into_boxed())?;
+        let value = serialize(&dht.adnl.build_address_list(None)?.into_boxed())?;
         Self::store_value(
             dht,
             Self::dht_key_from_key_id(key.id(), "address"),
@@ -762,7 +762,7 @@ None;
     fn sign_local_node(&self) -> Result<Node> {
         let local_node = Node {
             id: self.node_key.into_tl_public_key()?,
-            addr_list: self.adnl.build_address_list()?,
+            addr_list: self.adnl.build_address_list(None)?,
             signature: ton::bytes::default(),
             version: Version::get()
         };
