@@ -409,10 +409,13 @@ impl DhtNode {
     pub async fn store_ip_address(dht: &Arc<Self>, key: &Arc<KeyOption>) -> Result<bool> {
         log::debug!(target: TARGET, "Storing key ID {}", key.id());
         let value = serialize(&dht.adnl.build_address_list(None)?.into_boxed())?;
+        let value = Self::sign_value("address", &value[..], key)?;
+        let key = Self::dht_key_from_key_id(key.id(), "address");
+        dht.process_store_signed_value(hash(key.clone())?, value.clone())?;
         Self::store_value(
             dht,
-            Self::dht_key_from_key_id(key.id(), "address"),
-            Self::sign_value("address", &value[..], key)?,
+            key,
+            value,
             |object| object.is::<AddressListBoxed>(),
             false, 
             |mut objects| {
@@ -466,6 +469,7 @@ impl DhtNode {
             signature: ton::bytes::default(),
             value: ton::bytes(serialize(&nodes)?)
         };
+        dht.process_store_overlay_nodes(hash(key.clone())?, value.clone())?;
         Self::store_value(
             dht,
             key,
@@ -681,6 +685,7 @@ impl DhtNode {
     }
 
     fn process_store_overlay_nodes(&self, dht_key_id: DhtKeyId, value: DhtValue) -> Result<bool> {
+        log::trace!(target: TARGET, "Process Store Overlay Nodes {:?}", value);
         if value.signature.deref().len() != 0 {
             fail!("Wrong value signature for OverlayNodes")
         }
@@ -713,7 +718,7 @@ impl DhtNode {
                 let old_value = if let Some(old_value) = old_value {
                     if old_value.ttl < Version::get() {
                         None
-                    } else if old_value.ttl >= value.ttl {
+                    } else if old_value.ttl > value.ttl {
                         return Ok(None)
                     } else {
                         Some(&old_value.value)
@@ -729,8 +734,12 @@ impl DhtNode {
                 for node in nodes.iter() {
                     let mut found = false;
                     for old_node in old_nodes.iter_mut() {
-                        if (node.id == old_node.id) && (node.version > old_node.version) {
-                            *old_node = node.clone();
+                        if node.id == old_node.id {
+                            if node.version > old_node.version {
+                                *old_node = node.clone()
+                            } else {
+                                return Ok(None)
+                            }
                             found = true;
                             break;
                         }
@@ -738,12 +747,13 @@ impl DhtNode {
                     if !found {
                         old_nodes.push(node.clone())
                     }
-                } 
+                }
                 let nodes = OverlayNodes {
                     nodes: old_nodes.into()
                 }.into_boxed();
                 let mut ret = value.clone();
                 ret.value = ton::bytes(serialize(&nodes)?);
+                log::trace!(target: TARGET, "Store Overlay Nodes result {:?}", ret);
                 Ok(Some(ret))
             }
         )
