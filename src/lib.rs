@@ -207,6 +207,21 @@ impl DhtNode {
         Ok(true)
     }
 
+    /// Fetch address of node (locally) with given key ID 
+    pub async fn fetch_address(
+        &self,
+        key_id: &Arc<KeyId>
+    ) -> Result<Option<(IpAddress, KeyOption)>> {
+        let key = Self::dht_key_from_key_id(key_id, "address");
+        let value = self.search_dht_key(&hash(key)?);
+        if let Some(value) = value {
+            let object = deserialize(&value.value.0)?;
+            Ok(Some(Self::parse_value_as_address(value.key, object)?))
+        } else {
+            Ok(None)
+        }
+    }
+
     /// Find address of node with given key ID 
     pub async fn find_address(
         dht: &Arc<Self>, 
@@ -220,13 +235,7 @@ impl DhtNode {
             &mut None
         ).await?;
         if let Some((key, addr_list)) = addr_list.pop() {
-            if let Ok(addr_list) = addr_list.downcast::<AddressListBoxed>() {
-                let ip_address = AdnlNode::parse_address_list(&addr_list.only())?;
-                let key = KeyOption::from_tl_public_key(&key.id)?;
-                Ok((ip_address, key))
-            } else {
-                fail!("INTERNAL ERROR: address list type mismatch in search")
-            }
+            Self::parse_value_as_address(key, addr_list) 
         } else {
             fail!("No address found for {}", key_id)
         }
@@ -595,6 +604,19 @@ impl DhtNode {
         Ok(ret)
     }
 
+    fn parse_value_as_address(
+        key: DhtKeyDescription, 
+        value: TLObject
+    ) -> Result<(IpAddress, KeyOption)> {
+        if let Ok(addr_list) = value.downcast::<AddressListBoxed>() {
+            let ip_address = AdnlNode::parse_address_list(&addr_list.only())?;
+            let key = KeyOption::from_tl_public_key(&key.id)?;
+            Ok((ip_address, key))
+        } else {
+            fail!("Address list type mismatch in DHT search")
+        }
+    }
+
     fn process_find_node(&self, query: &FindNode) -> Result<Nodes> {
         log::trace!(target: TARGET, "Process FindNode query {:?}", query);
         let key1 = self.node_key.id().data();
@@ -640,19 +662,9 @@ impl DhtNode {
 
     fn process_find_value(&self, query: &FindValue) -> Result<DhtValueResult> {
         log::trace!(target: TARGET, "Process FindValue query {:?}", query);
-        let version = Version::get();
-        let value = if let Some(value) = self.storage.get(get256(&query.key)) {
-            if value.val().ttl > version {
-                Some(value)
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-        let ret = if let Some(value) = value {
+        let ret = if let Some(value) = self.search_dht_key(get256(&query.key)) {
             ValueFound {
-                value: value.val().clone().into_boxed()
+                value: value.into_boxed()
             }.into_boxed()
         } else {
             ValueNotFound {
@@ -789,6 +801,19 @@ impl DhtNode {
         let peers = AdnlPeers::with_keys(self.node_key.id().clone(), dst.clone());
         self.adnl.query_with_prefix(Some(&self.query_prefix[..]), query, &peers, None).await
     } 
+
+   fn search_dht_key(&self, key: &DhtKeyId) -> Option<DhtValue> { 
+        let version = Version::get();
+        if let Some(value) = self.storage.get(key) {
+            if value.val().ttl > version {
+                Some(value.val().clone())
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    }
     
     fn sign_key_description(name: &str, key: &Arc<KeyOption>) -> Result<DhtKeyDescription> {
         let key_description = DhtKeyDescription {
