@@ -8,7 +8,7 @@ use adnl::{
 };
 use overlay::{OverlayId, OverlayShortId, OverlayUtils};
 use rand::Rng;
-use std::{mem, ops::Deref, sync::Arc};
+use std::{fmt::{self, Display, Formatter}, mem, ops::Deref, sync::Arc};
 use ton_api::{
     IntoBoxed, 
     ton::{
@@ -88,6 +88,80 @@ pub fn build_dht_node_info(ip: &str, key: &str, signature: &str) -> Result<Node>
     Ok(node)
 }
 
+pub struct DhtIterator {
+    iter: Option<AddressCacheIterator>, 
+    key_id: DhtKeyId,
+    order: Vec<(u8, Arc<KeyId>)>
+}
+
+impl DhtIterator {
+
+    fn with_key_id(dht: &DhtNode, key_id: DhtKeyId) -> Self {
+        let mut ret = Self {
+            iter: None,
+            key_id, 
+            order: Vec::new() 
+        };
+        ret.update(dht);
+        ret
+    }
+
+    fn update(&mut self, dht: &DhtNode) {
+        let mut next = if let Some(iter) = &self.iter {
+            dht.known_peers.given(iter)
+        } else {
+            dht.get_known_peer(&mut self.iter)
+        };
+        loop {
+            if let Some(peer) = next {
+                let affinity = DhtNode::get_affinity(peer.data(), &self.key_id);
+                let add = if let Some((top_affinity, _)) = self.order.last() {
+                    (*top_affinity <= affinity) || (self.order.len() < DhtNode::MAX_TASKS) 
+                } else {
+                    true
+                };
+                if add {
+                    self.order.push((affinity, peer))
+                }
+                next = dht.get_known_peer(&mut self.iter)
+            } else {
+                break
+            }
+        }
+        self.order.sort_unstable_by_key(|(affinity, _)| *affinity);
+        if let Some((top_affinity, _)) = self.order.last() {
+            let mut drop_to = 0;
+            while self.order.len() - drop_to > DhtNode::MAX_TASKS {
+                let (affinity, _) = self.order[drop_to];
+                if affinity < *top_affinity {
+                    drop_to += 1
+                } else {
+                    break
+                }
+            }
+            self.order.drain(0..drop_to);
+        }
+        if log::log_enabled!(log::Level::Debug) {
+            let mut out = format!("DHT search list for {}:\n", base64::encode(&self.key_id));
+            for (affinity, key_id) in self.order.iter().rev() {
+                out.push_str(format!("order {} - {}\n", affinity, key_id).as_str())
+            }
+            log::debug!(target: TARGET, "{}", out);
+        }
+    }
+
+}
+
+impl Display for DhtIterator {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        if let Some(iter) = &self.iter {
+            write!(f, "{} peers remained of {:?}", self.order.len(), iter)
+        } else {
+            write!(f, "no peers yet")
+        }
+    }
+}
+
 type DhtKeyId = [u8; 32];
 
 /// DHT Node
@@ -147,26 +221,13 @@ impl DhtNode {
         if self.known_peers.put(ret.clone())? {
             let key1 = self.node_key.id().data();
             let key2 = ret.data();
-            let mut dist = 0;
-            for i in 0..32 {
-                match key1[i] ^ key2[i] {
-                    0 => dist += 8,
-                    x => {
-                        if (x & 0xF0) == 0 {
-                            dist += Self::BITS[(x & 0x0F) as usize] + 4
-                        } else {
-                            dist += Self::BITS[(x >> 4) as usize]
-                        }
-                        break
-                    }
-                }
-            }
+            let affinity = Self::get_affinity(key1, key2);
             add_object_to_map(
                 &self.buckets, 
-                dist, 
+                affinity, 
                 || Ok(lockfree::map::Map::new())
             )?;
-            if let Some(bucket) = self.buckets.get(&dist) {
+            if let Some(bucket) = self.buckets.get(&affinity) {
                 add_object_to_map_with_update(
                     bucket.val(),
                     ret.clone(), 
@@ -245,14 +306,18 @@ impl DhtNode {
     pub async fn find_overlay_nodes(
         dht: &Arc<Self>, 
         overlay_id: &Arc<OverlayShortId>,
-        iter: &mut Option<AddressCacheIterator>
+        iter: &mut Option<DhtIterator>
     ) -> Result<Vec<(IpAddress, OverlayNode)>> {
         let mut ret = Vec::new();
         let mut nodes = Vec::new();
         log::trace!(
             target: TARGET, 
-            "-------- Overlay nodes search from {:?}", 
-            iter
+            "-------- Overlay nodes search, {}", 
+            if let Some(iter) = iter {
+                iter.to_string()
+            } else {
+                format!("{} peers remained", dht.known_peers.count())
+            }
         );
         loop {
             let mut nodes_lists = DhtNode::find_value(
@@ -339,7 +404,7 @@ impl DhtNode {
         Ok(ret)
     }
 
-    /// First DHT peer
+    /// Get DHT peer via iterator
     pub fn get_known_peer(&self, iter: &mut Option<AddressCacheIterator>) -> Option<Arc<KeyId>> {
         if let Some(iter) = iter {
             self.known_peers.next(iter)
@@ -523,16 +588,14 @@ impl DhtNode {
         key: DhtKey, 
         check: impl Fn(&TLObject) -> bool + Copy + Send + 'static,
         all: bool,
-        iter_opt: &mut Option<AddressCacheIterator>
+        iter_opt: &mut Option<DhtIterator>
     ) -> Result<Vec<(DhtKeyDescription, TLObject)>> {
-        let mut current = dht.get_known_peer(iter_opt);
-        let mut ret = Vec::new();
-        let iter = if let Some(ref mut iter) = iter_opt {
-            iter
-        } else {
-            return Ok(ret)
-        };
         let key = hash(key)?;
+        let iter = iter_opt.get_or_insert_with(||DhtIterator::with_key_id(dht, key.clone()));
+        if iter.key_id != key {
+            fail!("INTERNAL ERROR: DHT key mismatch in value search")
+        }
+        let mut ret = Vec::new();
         let query = TLObject::new(
             FindValue { 
                 key: ton::int256(key.clone()),
@@ -542,13 +605,14 @@ impl DhtNode {
         let key = Arc::new(key); 
         let query = Arc::new(query);
         let (wait, mut queue_reader) = Wait::new();  
+        let mut known_peers = dht.known_peers.count();
         log::debug!(
             target: TARGET, 
-            "FindValue with DHT key ID {} query {:?} of {}", 
-            base64::encode(&key[..]), iter, dht.known_peers.count()
+            "FindValue with DHT key ID {} query, {}", 
+            base64::encode(&key[..]), iter
         );
         loop {
-            while let Some(peer) = current {
+            while let Some((_, peer)) = iter.order.pop() {
                 let dht_cloned = dht.clone();
                 let key = key.clone();  
                 let peer = peer.clone(); 
@@ -566,23 +630,28 @@ impl DhtNode {
                         } 
                     } 
                 );
-                current = dht.known_peers.next(iter);
                 if reqs >= Self::MAX_TASKS {
                     break;
                 } 
             } 
             log::debug!(
                 target: TARGET, 
-                "FindValue with DHT key ID {} query, {} parallel reqs, iter {:?} of {}", 
-                base64::encode(&key[..]), wait.count(), iter, dht.known_peers.count()
+                "FindValue with DHT key ID {} query, {} parallel reqs, {}", 
+                base64::encode(&key[..]), wait.count(), iter
             );
             let mut finished = false; 
             loop {
                 match wait.wait(&mut queue_reader, !all).await { 
                     Some(None) => (),
                     Some(Some(val)) => ret.push(val),
-                    None => {
-                        finished = true;
+                    None => finished = true
+                }
+                // Update iterator if required
+                if all || ret.is_empty() {
+                    let updated_known_peers = dht.known_peers.count();
+                    if updated_known_peers != known_peers {
+                        iter.update(dht);
+                        known_peers = updated_known_peers;
                     }
                 }
                 // Add more tasks if required 
@@ -594,14 +663,29 @@ impl DhtNode {
             if (all && (ret.len() >= Self::MAX_TASKS)) || (!all && !ret.is_empty()) || finished {
                 break
             } 
-            if current.is_none() {
-                current = dht.known_peers.given(iter);
-            }                
         }
-        if current.is_none() {
+        if iter.order.is_empty() {
             iter_opt.take();
         }
         Ok(ret)
+    }
+
+    fn get_affinity(key1: &DhtKeyId, key2: &DhtKeyId) -> u8 {
+        let mut ret = 0;
+        for i in 0..32 {
+            match key1[i] ^ key2[i] {
+                0 => ret += 8,
+                x => {
+                    if (x & 0xF0) == 0 {
+                        ret += Self::BITS[(x & 0x0F) as usize] + 4
+                    } else {
+                        ret += Self::BITS[(x >> 4) as usize]
+                    }
+                    break
+                }
+            }
+        }
+        ret
     }
 
     fn parse_value_as_address(
@@ -790,7 +874,7 @@ impl DhtNode {
 
     async fn query(&self, dst: &Arc<KeyId>, query: &TLObject) -> Result<Option<TLObject>> {
         let peers = AdnlPeers::with_keys(self.node_key.id().clone(), dst.clone());
-        self.adnl.query(query, &peers, None).await
+        self.adnl.clone().query(query, &peers, None).await
     } 
 
     async fn query_with_prefix(
@@ -799,7 +883,9 @@ impl DhtNode {
         query: &TLObject
     ) -> Result<Option<TLObject>> {
         let peers = AdnlPeers::with_keys(self.node_key.id().clone(), dst.clone());
-        self.adnl.query_with_prefix(Some(&self.query_prefix[..]), query, &peers, None).await
+        self.adnl.clone()
+            .query_with_prefix(Some(&self.query_prefix[..]), query, &peers, None)
+            .await
     } 
 
    fn search_dht_key(&self, key: &DhtKeyId) -> Option<DhtValue> { 
@@ -898,24 +984,6 @@ impl DhtNode {
                     None => break
                 }
             }
-/*            
-            while let Some(next) = peer {
-                let answer = dht.query(&next, &query).await?;
-                if let Some(answer) = answer {
-                    match Query::parse::<TLObject, Stored>(answer, &query) {
-                        Ok(_) => (), // Probably stored
-                        Err(answer) => log::debug!(
-                            target: TARGET, 
-                            "Improper store IP address reply: {:?}", 
-                            answer
-                        )
-                    }
-                } else {
-                    // No reply at all
-                }
-                peer = dht.known_peers.next(&mut iter);
-            }
-*/
             let vals = DhtNode::find_value(
                 dht, 
                 key.clone(), 
