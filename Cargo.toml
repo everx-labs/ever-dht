@@ -2,7 +2,7 @@
 edition = "2018"
 build = "./common/build/build.rs"
 name = "dht"
-version = "0.2.50"
+version = "0.2.56"
 description = "DHT protocol library"
 
 [dependencies]
