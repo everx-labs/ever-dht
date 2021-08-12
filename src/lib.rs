@@ -2,10 +2,12 @@ use adnl::{
     common::{
         add_object_to_map, add_object_to_map_with_update, AdnlPeers, deserialize, get256, 
         hash, hash_boxed, KeyId, KeyOption, Query, QueryResult, serialize, serialize_inplace, 
-        Subscriber, Version, Wait
+        Subscriber, TaggedTlObject, Version, Wait
     }, 
     node::{AddressCache, AddressCacheIterator, AdnlNode, IpAddress}
 };
+#[cfg(feature = "telemetry")]
+use adnl::common::tag_from_boxed_type;
 use overlay::{OverlayId, OverlayShortId, OverlayUtils};
 use rand::Rng;
 use std::{fmt::{self, Display, Formatter}, mem, ops::Deref, sync::Arc};
@@ -171,7 +173,17 @@ pub struct DhtNode {
     known_peers: AddressCache,
     node_key: Arc<KeyOption>,
     query_prefix: Vec<u8>,
-    storage: lockfree::map::Map<DhtKeyId, DhtValue>
+    storage: lockfree::map::Map<DhtKeyId, DhtValue>,
+    #[cfg(feature = "telemetry")]
+    tag_dht_ping: u32,
+    #[cfg(feature = "telemetry")]
+    tag_get_signed_address_list: u32,
+    #[cfg(feature = "telemetry")]
+    tag_find_node: u32,
+    #[cfg(feature = "telemetry")]
+    tag_find_value: u32,
+    #[cfg(feature = "telemetry")]
+    tag_store: u32
 }
 
 impl DhtNode {
@@ -194,6 +206,16 @@ impl DhtNode {
             node_key,
             query_prefix: Vec::new(),
             storage: lockfree::map::Map::new(),
+            #[cfg(feature = "telemetry")]
+            tag_dht_ping: tag_from_boxed_type::<DhtPing>(),
+            #[cfg(feature = "telemetry")]
+            tag_find_node: tag_from_boxed_type::<FindNode>(),
+            #[cfg(feature = "telemetry")]
+            tag_find_value: tag_from_boxed_type::<FindValue>(),
+            #[cfg(feature = "telemetry")]
+            tag_get_signed_address_list: tag_from_boxed_type::<GetSignedAddressList>(),
+            #[cfg(feature = "telemetry")]
+            tag_store: tag_from_boxed_type::<Store>()
         };
         let query = DhtQuery { 
             node: ret.sign_local_node()?
@@ -248,14 +270,19 @@ impl DhtNode {
 
     /// Find DHT nodes
     pub async fn find_dht_nodes(&self, dst: &Arc<KeyId>) -> Result<bool> {
-        let query = FindNode {
-            key: ton::int256(self.node_key.id().data().clone()),
-            k: 10
+        let query = TaggedTlObject {
+            object: TLObject::new(
+                FindNode {
+                    key: ton::int256(self.node_key.id().data().clone()),
+                    k: 10
+                }
+            ),
+            #[cfg(feature = "telemetry")]
+            tag: self.tag_find_node
         };
-        let query = TLObject::new(query);
         let answer = self.query_with_prefix(dst, &query).await?;
         let answer: NodesBoxed = if let Some(answer) = answer {
-            Query::parse(answer, &query)?
+            Query::parse(answer, &query.object)?
         } else {
             return Ok(false)
         };        
@@ -436,10 +463,14 @@ impl DhtNode {
                     
     /// Get signed address list 
     pub async fn get_signed_address_list(&self, dst: &Arc<KeyId>) -> Result<bool> {
-        let query = TLObject::new(GetSignedAddressList);
+        let query = TaggedTlObject {
+            object: TLObject::new(GetSignedAddressList),
+            #[cfg(feature = "telemetry")]
+            tag: self.tag_get_signed_address_list
+        };
         let answer = self.query_with_prefix(dst, &query).await?;
         let answer: NodeBoxed = if let Some(answer) = answer {
-            Query::parse(answer, &query)?
+            Query::parse(answer, &query.object)?
         } else {
             return Ok(false)
         };
@@ -465,14 +496,18 @@ impl DhtNode {
     /// Ping 
     pub async fn ping(&self, dst: &Arc<KeyId>) -> Result<bool> {
         let random_id = rand::thread_rng().gen();
-        let query = TLObject::new(
-            DhtPing { 
-                random_id 
-            }
-        );
+        let query = TaggedTlObject {
+            object: TLObject::new(
+                DhtPing { 
+                    random_id 
+                }
+            ),
+            #[cfg(feature = "telemetry")]
+            tag: self.tag_dht_ping
+        };
         let answer = self.query(dst, &query).await?;
         let answer: DhtPongBoxed = if let Some(answer) = answer {
-            Query::parse(answer, &query)?
+            Query::parse(answer, &query.object)?
         } else {
             return Ok(false)
         };
@@ -596,12 +631,16 @@ impl DhtNode {
             fail!("INTERNAL ERROR: DHT key mismatch in value search")
         }
         let mut ret = Vec::new();
-        let query = TLObject::new(
-            FindValue { 
-                key: ton::int256(key.clone()),
-                k: 6 
-            }
-        );
+        let query = TaggedTlObject {
+            object: TLObject::new(
+                FindValue { 
+                    key: ton::int256(key.clone()),
+                    k: 6 
+                }
+            ),
+            #[cfg(feature = "telemetry")]
+            tag: dht.tag_find_value
+        };
         let key = Arc::new(key); 
         let query = Arc::new(query);
         let (wait, mut queue_reader) = Wait::new();  
@@ -872,7 +911,11 @@ impl DhtNode {
         )
     }
 
-    async fn query(&self, dst: &Arc<KeyId>, query: &TLObject) -> Result<Option<TLObject>> {
+    async fn query(
+        &self, 
+        dst: &Arc<KeyId>, 
+        query: &TaggedTlObject
+    ) -> Result<Option<TLObject>> {
         let peers = AdnlPeers::with_keys(self.node_key.id().clone(), dst.clone());
         self.adnl.clone().query(query, &peers, None).await
     } 
@@ -880,7 +923,7 @@ impl DhtNode {
     async fn query_with_prefix(
         &self, 
         dst: &Arc<KeyId>, 
-        query: &TLObject
+        query: &TaggedTlObject
     ) -> Result<Option<TLObject>> {
         let peers = AdnlPeers::with_keys(self.node_key.id().clone(), dst.clone());
         self.adnl.clone()
@@ -939,10 +982,16 @@ impl DhtNode {
         check_all: bool,
         check_vals: impl Fn(Vec<(DhtKeyDescription, TLObject)>) -> Result<bool>
     ) -> Result<bool> {
-        let query = Store {
-            value
+        let query = TaggedTlObject {
+            object: TLObject::new(
+                Store {
+                    value
+                }
+            ),
+            #[cfg(feature = "telemetry")]
+            tag: dht.tag_store
         };
-        let query = Arc::new(TLObject::new(query)); 
+        let query = Arc::new(query); 
         let (mut iter, mut peer) = dht.known_peers.first();
         let (wait, mut queue_reader) = Wait::new();
         while peer.is_some() {
@@ -956,7 +1005,7 @@ impl DhtNode {
                     async move {
                         let ret = match dht.query(&next, &query).await {
                             Ok(Some(answer)) => {
-                                match Query::parse::<TLObject, Stored>(answer, &query) {
+                                match Query::parse::<TLObject, Stored>(answer, &query.object) {
                                     Ok(_) => Some(()), // Probably stored
                                     Err(answer) => {
                                         log::debug!(
@@ -1002,13 +1051,13 @@ impl DhtNode {
     async fn value_query(
         &self, 
         peer: &Arc<KeyId>, 
-        query: &Arc<TLObject>,
+        query: &Arc<TaggedTlObject>,
         key: &Arc<DhtKeyId>,
         check: impl Fn(&TLObject) -> bool
     ) -> Result<Option<(DhtKeyDescription, TLObject)>> {
         let answer = self.query(peer, query).await?;
         if let Some(answer) = answer {
-            let answer: DhtValueResult = Query::parse(answer, &query)?;
+            let answer: DhtValueResult = Query::parse(answer, &query.object)?;
             match answer {
                 DhtValueResult::Dht_ValueFound(value) => {
                     let value = value.value.only();
@@ -1076,23 +1125,43 @@ impl Subscriber for DhtNode {
         _peers: &AdnlPeers
     ) -> Result<QueryResult> {
         let object = match object.downcast::<DhtPing>() {
-            Ok(query) => return QueryResult::consume(self.process_ping(&query)?),
+            Ok(query) => return QueryResult::consume(
+                self.process_ping(&query)?, 
+                #[cfg(feature = "telemetry")]
+                None
+            ),
             Err(object) => object
         };
         let object = match object.downcast::<FindNode>() {
-            Ok(query) => return QueryResult::consume(self.process_find_node(&query)?),
+            Ok(query) => return QueryResult::consume(
+                self.process_find_node(&query)?, 
+                #[cfg(feature = "telemetry")]
+                None
+            ),
             Err(object) => object
         };
         let object = match object.downcast::<FindValue>() {
-            Ok(query) => return QueryResult::consume_boxed(self.process_find_value(&query)?),
+            Ok(query) => return QueryResult::consume_boxed(
+                self.process_find_value(&query)?, 
+                #[cfg(feature = "telemetry")]
+                None
+            ),
             Err(object) => object
         };
         let object = match object.downcast::<GetSignedAddressList>() {
-            Ok(_) => return QueryResult::consume(self.get_signed_node()?),
+            Ok(_) => return QueryResult::consume(
+                self.get_signed_node()?, 
+                #[cfg(feature = "telemetry")]
+                None
+            ),
             Err(object) => object
         };
         match object.downcast::<Store>() {
-            Ok(query) => QueryResult::consume_boxed(self.process_store(query)?),
+            Ok(query) => QueryResult::consume_boxed(
+                self.process_store(query)?, 
+                #[cfg(feature = "telemetry")]
+                None
+            ),
             Err(object) => {
                 log::warn!(target: TARGET, "Unexpected DHT query {:?}", object);
                 Ok(QueryResult::Rejected(object))
