@@ -57,7 +57,7 @@ macro_rules! sign {
 macro_rules! verify {
     ($data:expr, $key:ident) => {
         {
-            let signature = mem::replace(&mut $data.signature.0, Vec::new());
+            let signature = mem::take(&mut $data.signature.0);
             let data = $data.into_boxed();
             let buf = serialize(&data)?;
             $key.verify(&buf[..], &signature[..])?;
@@ -75,7 +75,7 @@ pub fn build_dht_node_info(ip: &str, key: &str, signature: &str) -> Result<Node>
     let signature = base64::decode(signature)?;
     let node = Node {
         id: Ed25519 {
-            key: ton::int256(arrayref::array_ref!(&key, 0, 32).clone())
+            key: ton::int256(*arrayref::array_ref!(&key, 0, 32))
         }.into_boxed(),
         addr_list: AddressList {
             addrs: addrs.into(),
@@ -114,21 +114,17 @@ impl DhtIterator {
         } else {
             dht.get_known_peer(&mut self.iter)
         };
-        loop {
-            if let Some(peer) = next {
-                let affinity = DhtNode::get_affinity(peer.data(), &self.key_id);
-                let add = if let Some((top_affinity, _)) = self.order.last() {
-                    (*top_affinity <= affinity) || (self.order.len() < DhtNode::MAX_TASKS) 
-                } else {
-                    true
-                };
-                if add {
-                    self.order.push((affinity, peer))
-                }
-                next = dht.get_known_peer(&mut self.iter)
+        while let Some(peer) = next {
+            let affinity = DhtNode::get_affinity(peer.data(), &self.key_id);
+            let add = if let Some((top_affinity, _)) = self.order.last() {
+                (*top_affinity <= affinity) || (self.order.len() < DhtNode::MAX_TASKS) 
             } else {
-                break
+                true
+            };
+            if add {
+                self.order.push((affinity, peer))
             }
+            next = dht.get_known_peer(&mut self.iter)
         }
         self.order.sort_unstable_by_key(|(affinity, _)| *affinity);
         if let Some((top_affinity, _)) = self.order.last() {
@@ -273,7 +269,7 @@ impl DhtNode {
         let query = TaggedTlObject {
             object: TLObject::new(
                 FindNode {
-                    key: ton::int256(self.node_key.id().data().clone()),
+                    key: ton::int256(*self.node_key.id().data()),
                     k: 10
                 }
             ),
@@ -612,7 +608,7 @@ impl DhtNode {
 
     fn dht_key_from_key_id(id: &Arc<KeyId>, name: &str) -> DhtKey {
         DhtKey {
-            id: ton::int256(id.data().clone()),
+            id: ton::int256(*id.data()),
             idx: 0,
             name: ton::bytes(name.as_bytes().to_vec())
         }
@@ -626,7 +622,7 @@ impl DhtNode {
         iter_opt: &mut Option<DhtIterator>
     ) -> Result<Vec<(DhtKeyDescription, TLObject)>> {
         let key = hash(key)?;
-        let iter = iter_opt.get_or_insert_with(||DhtIterator::with_key_id(dht, key.clone()));
+        let iter = iter_opt.get_or_insert_with(||DhtIterator::with_key_id(dht, key));
         if iter.key_id != key {
             fail!("INTERNAL ERROR: DHT key mismatch in value search")
         }
@@ -634,7 +630,7 @@ impl DhtNode {
         let query = TaggedTlObject {
             object: TLObject::new(
                 FindValue { 
-                    key: ton::int256(key.clone()),
+                    key: ton::int256(key),
                     k: 6 
                 }
             ),
@@ -694,7 +690,7 @@ impl DhtNode {
                     }
                 }
                 // Add more tasks if required 
-                if (all && (ret.len() < Self::MAX_TASKS)) || !all || finished {
+                if !all || (ret.len() < Self::MAX_TASKS) || finished {
                     break
                 }
             }
@@ -821,10 +817,10 @@ impl DhtNode {
 
     fn process_store_overlay_nodes(&self, dht_key_id: DhtKeyId, value: DhtValue) -> Result<bool> {
         log::trace!(target: TARGET, "Process Store Overlay Nodes {:?}", value);
-        if value.signature.deref().len() != 0 {
+        if !value.signature.deref().is_empty() {
             fail!("Wrong value signature for OverlayNodes")
         }
-        if value.key.signature.deref().len() != 0 {
+        if !value.key.signature.deref().is_empty() {
             fail!("Wrong key signature for OverlayNodes")
         }
         let overlay_short_id = match value.key.id {
@@ -1027,11 +1023,7 @@ impl DhtNode {
                     }
                 );
             }
-            loop {  
-                match wait.wait(&mut queue_reader, false).await { 
-                    Some(_) => (),
-                    None => break
-                }
+            while wait.wait(&mut queue_reader, false).await.is_some() { 
             }
             let vals = DhtNode::find_value(
                 dht, 
