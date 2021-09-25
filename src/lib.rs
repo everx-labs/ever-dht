@@ -1,16 +1,21 @@
 use adnl::{
+    declare_counted,
     common::{
-        add_object_to_map, add_object_to_map_with_update, AdnlPeers, deserialize, get256, 
-        hash, hash_boxed, KeyId, KeyOption, Query, QueryResult, serialize, serialize_inplace, 
-        Subscriber, TaggedTlObject, Version, Wait
+        add_counted_object_to_map_with_update, add_unbound_object_to_map, AdnlPeers, 
+        CountedObject, Counter, deserialize, get256, hash, hash_boxed, KeyId, KeyOption, 
+        Query, QueryResult, serialize, serialize_inplace, Subscriber, TaggedTlObject, 
+        Version, Wait
     }, 
-    node::{AddressCache, AddressCacheIterator, AdnlNode, IpAddress}
+    node::{AddressCache, AddressCacheIterator, AdnlNode, IpAddress}, telemetry::Metric
 };
 #[cfg(feature = "telemetry")]
 use adnl::common::tag_from_boxed_type;
 use overlay::{OverlayId, OverlayShortId, OverlayUtils};
 use rand::Rng;
-use std::{fmt::{self, Display, Formatter}, mem, ops::Deref, sync::Arc};
+use std::{
+    fmt::{self, Display, Formatter}, mem, ops::Deref, time::Instant, 
+    sync::{Arc, atomic::{AtomicU64, Ordering}}
+};
 use ton_api::{
     IntoBoxed, 
     ton::{
@@ -162,14 +167,37 @@ impl Display for DhtIterator {
 
 type DhtKeyId = [u8; 32];
 
+declare_counted!(
+    struct NodeObject {
+        object: Node
+    }
+);
+
+declare_counted!(
+    struct ValueObject {
+        object: DhtValue
+    }
+);
+
+#[cfg(feature = "telemetry")]
+struct DhtTelemetry {
+    peers: Arc<Metric>,
+    values: Arc<Metric>
+}
+
+struct DhtAlloc {
+    peers: Arc<AtomicU64>,
+    values: Arc<AtomicU64>
+}
+
 /// DHT Node
 pub struct DhtNode {
     adnl: Arc<AdnlNode>,
-    buckets: lockfree::map::Map<u8, lockfree::map::Map<Arc<KeyId>, Node>>,
+    buckets: lockfree::map::Map<u8, lockfree::map::Map<Arc<KeyId>, NodeObject>>,
     known_peers: AddressCache,
     node_key: Arc<KeyOption>,
     query_prefix: Vec<u8>,
-    storage: lockfree::map::Map<DhtKeyId, DhtValue>,
+    storage: lockfree::map::Map<DhtKeyId, ValueObject>,
     #[cfg(feature = "telemetry")]
     tag_dht_ping: u32,
     #[cfg(feature = "telemetry")]
@@ -179,7 +207,10 @@ pub struct DhtNode {
     #[cfg(feature = "telemetry")]
     tag_find_value: u32,
     #[cfg(feature = "telemetry")]
-    tag_store: u32
+    tag_store: u32,
+    #[cfg(feature = "telemetry")]
+    telemetry: DhtTelemetry,
+    allocated: DhtAlloc
 }
 
 impl DhtNode {
@@ -195,6 +226,15 @@ impl DhtNode {
     /// Constructor 
     pub fn with_adnl_node(adnl: Arc<AdnlNode>, key_tag: usize) -> Result<Arc<Self>> {
         let node_key = adnl.key_by_tag(key_tag)?;
+        #[cfg(feature = "telemetry")]
+        let telemetry = DhtTelemetry {
+            peers: adnl.add_metric("Alloc DHT peers"),
+            values: adnl.add_metric("Alloc DHT values")
+        };
+        let allocated = DhtAlloc {
+            peers: Arc::new(AtomicU64::new(0)),
+            values: Arc::new(AtomicU64::new(0))
+        };
         let mut ret = Self {
             adnl,
             buckets: lockfree::map::Map::new(),
@@ -211,7 +251,10 @@ impl DhtNode {
             #[cfg(feature = "telemetry")]
             tag_get_signed_address_list: tag_from_boxed_type::<GetSignedAddressList>(),
             #[cfg(feature = "telemetry")]
-            tag_store: tag_from_boxed_type::<Store>()
+            tag_store: tag_from_boxed_type::<Store>(),
+            #[cfg(feature = "telemetry")]
+            telemetry,
+            allocated
         };
         let query = DhtQuery { 
             node: ret.sign_local_node()?
@@ -240,23 +283,30 @@ impl DhtNode {
             let key1 = self.node_key.id().data();
             let key2 = ret.data();
             let affinity = Self::get_affinity(key1, key2);
-            add_object_to_map(
+            add_unbound_object_to_map(
                 &self.buckets, 
                 affinity, 
                 || Ok(lockfree::map::Map::new())
             )?;
             if let Some(bucket) = self.buckets.get(&affinity) {
-                add_object_to_map_with_update(
+                add_counted_object_to_map_with_update(
                     bucket.val(),
                     ret.clone(), 
-                    |old_node| if let Some(old_node) = old_node {
-                        if old_node.version < peer.version {
-                            Ok(Some(peer.clone()))
-                        } else {
-                            Ok(None)
+                    |old_node| {
+                        if let Some(old_node) = old_node {
+                            if old_node.object.version >= peer.version {
+                                return Ok(None)
+                            }
                         }
-                    } else {
-                        Ok(Some(peer.clone()))
+                        let ret = NodeObject {
+                            object: peer.clone(),
+                            counter: self.allocated.peers.clone().into()
+                        };
+                        #[cfg(feature = "telemetry")]
+                        self.telemetry.peers.update(
+                            self.allocated.peers.load(Ordering::Relaxed)
+                        );
+                        Ok(Some(ret))
                     }
                 )?;
             }
@@ -447,7 +497,7 @@ impl DhtNode {
         for i in 0..=255 {
             if let Some(bucket) = self.buckets.get(&i) {
                 for node in bucket.val().iter() {         
-                    ret.push(node.val().clone());
+                    ret.push(node.val().object.clone());
                     if ret.len() == limit {
                         return Ok(ret)
                     }
@@ -757,7 +807,7 @@ impl DhtNode {
                     subdist = subdist.saturating_add(shift);
                     if let Some(bucket) = self.buckets.get(&subdist) {
                         for node in bucket.val().iter() {         
-                            ret.push(node.val().clone());
+                            ret.push(node.val().object.clone());
                             if ret.len() == query.k as usize {
                                 break
                             }
@@ -842,17 +892,17 @@ impl DhtNode {
         if nodes.is_empty() {
             fail!("Empty overlay nodes list")
         }
-        add_object_to_map_with_update(
+        add_counted_object_to_map_with_update(
             &self.storage,
             dht_key_id, 
             |old_value| {
                 let old_value = if let Some(old_value) = old_value {
-                    if old_value.ttl < Version::get() {
+                    if old_value.object.ttl < Version::get() {
                         None
-                    } else if old_value.ttl > value.ttl {
+                    } else if old_value.object.ttl > value.ttl {
                         return Ok(None)
                     } else {
-                        Some(&old_value.value)
+                        Some(&old_value.object.value)
                     }
                 } else {
                     None
@@ -882,9 +932,16 @@ impl DhtNode {
                 let nodes = OverlayNodes {
                     nodes: old_nodes.into()
                 }.into_boxed();
-                let mut ret = value.clone();
-                ret.value = ton::bytes(serialize(&nodes)?);
-                log::trace!(target: TARGET, "Store Overlay Nodes result {:?}", ret);
+                let mut ret = ValueObject {
+                    object: value.clone(),
+                    counter: self.allocated.values.clone().into()
+                };
+                #[cfg(feature = "telemetry")]
+                self.telemetry.values.update(
+                    self.allocated.values.load(Ordering::Relaxed)
+                );
+                ret.object.value = ton::bytes(serialize(&nodes)?);
+                log::trace!(target: TARGET, "Store Overlay Nodes result {:?}", ret.object);
                 Ok(Some(ret))
             }
         )
@@ -892,17 +949,24 @@ impl DhtNode {
 
     fn process_store_signed_value(&self, dht_key_id: DhtKeyId, value: DhtValue) -> Result<bool> {
         self.verify_value(&value)?;
-        add_object_to_map_with_update(
+        add_counted_object_to_map_with_update(
             &self.storage,
             dht_key_id, 
-            |old_value| if let Some(old_value) = old_value {
-                if old_value.ttl < value.ttl {
-                    Ok(Some(value.clone()))
-                } else {
-                    Ok(None)
+            |old_value| {
+                if let Some(old_value) = old_value {
+                    if old_value.object.ttl >= value.ttl {
+                        return Ok(None)
+                    }
                 }
-            } else {
-                Ok(Some(value.clone()))
+                let ret = ValueObject {
+                    object: value.clone(),
+                    counter: self.allocated.values.clone().into()
+                };
+                #[cfg(feature = "telemetry")]
+                self.telemetry.values.update(
+                    self.allocated.values.load(Ordering::Relaxed)
+                );
+                Ok(Some(ret))
             }
         )
     }
@@ -930,8 +994,8 @@ impl DhtNode {
    fn search_dht_key(&self, key: &DhtKeyId) -> Option<DhtValue> { 
         let version = Version::get();
         if let Some(value) = self.storage.get(key) {
-            if value.val().ttl > version {
-                Some(value.val().clone())
+            if value.val().object.ttl > version {
+                Some(value.val().object.clone())
             } else {
                 None
             }
@@ -1110,6 +1174,12 @@ impl DhtNode {
 
 #[async_trait::async_trait]
 impl Subscriber for DhtNode {
+
+    #[cfg(feature = "telemetry")]
+    async fn poll(&self, _start: &Arc<Instant>) {
+        self.telemetry.peers.update(self.allocated.peers.load(Ordering::Relaxed));
+        self.telemetry.values.update(self.allocated.values.load(Ordering::Relaxed));
+    }
 
     async fn try_consume_query(
         &self, 
