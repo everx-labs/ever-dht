@@ -6,16 +6,18 @@ use adnl::{
         Query, QueryResult, serialize, serialize_inplace, Subscriber, TaggedTlObject, 
         Version, Wait
     }, 
-    node::{AddressCache, AddressCacheIterator, AdnlNode, IpAddress}, telemetry::Metric
+    node::{AddressCache, AddressCacheIterator, AdnlNode, IpAddress}
 };
 #[cfg(feature = "telemetry")]
-use adnl::common::tag_from_boxed_type;
+use adnl::{common::tag_from_boxed_type, telemetry::Metric};
 use overlay::{OverlayId, OverlayShortId, OverlayUtils};
 use rand::Rng;
 use std::{
-    fmt::{self, Display, Formatter}, mem, ops::Deref, time::Instant, 
-    sync::{Arc, atomic::{AtomicU64, Ordering}}
+    convert::TryInto, fmt::{self, Display, Formatter}, mem, ops::Deref, 
+    sync::{Arc, atomic::AtomicU64}
 };
+#[cfg(feature = "telemetry")]
+use std::{sync::atomic::Ordering, time::Instant};
 use ton_api::{
     IntoBoxed, 
     ton::{
@@ -76,11 +78,12 @@ pub fn build_dht_node_info(ip: &str, key: &str, signature: &str) -> Result<Node>
     if key.len() != 32 {
         fail!("Bad public key length")
     }
+    let key: [u8; 32] = key.as_slice().try_into()?;
     let addrs = vec![IpAddress::from_string(ip)?.into_udp().into_boxed()];
     let signature = base64::decode(signature)?;
     let node = Node {
         id: Ed25519 {
-            key: ton::int256(*arrayref::array_ref!(&key, 0, 32))
+            key: ton::int256(key)
         }.into_boxed(),
         addr_list: AddressList {
             addrs: addrs.into(),
