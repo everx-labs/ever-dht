@@ -1,37 +1,37 @@
 [package]
-edition = "2018"
-build = "./common/build/build.rs"
-name = "dht"
-version = "0.5.48"
-description = "DHT protocol library"
-resolver = "2"
+build = './common/build/build.rs'
+description = 'DHT protocol library'
+edition = '2018'
+name = 'dht'
+resolver = '2'
+version = '0.5.60'
 
 [workspace]
 
-[dependencies]
-async-trait = "0.1"
-base64 = "0.13"
-failure = "0.1"
-hex = "0.4"
-log = "0.4"
-rand = "0.8"
-sha2 = "0.9"
-tokio = { version = "1.5", features = ["rt-multi-thread"] }
 
-adnl = { git = 'https://github.com/tonlabs/ton-labs-adnl.git', features = [ 'node' ], tag = '0.7.55' }
-overlay = { git = 'https://github.com/tonlabs/ton-labs-overlay.git', tag = '0.6.35' }
-ton_api = { git = 'https://github.com/tonlabs/ton-labs-tl.git', package = 'ton_api', tag = '0.2.111' }
-ton_types = { git = 'https://github.com/tonlabs/ton-labs-types.git', tag = '1.10.11' }
-lockfree = { git = "https://github.com/tonlabs/lockfree.git" }
+[dependencies]
+async-trait = '0.1'
+base64 = '0.13'
+failure = '0.1'
+hex = '0.4'
+log = '0.4'
+rand = '0.8'
+sha2 = '0.9'
+adnl = { features = [ 'node' ], git = 'https://github.com/tonlabs/ton-labs-adnl', tag = '0.7.63' }
+lockfree = { git = 'https://github.com/tonlabs/lockfree.git' }
+overlay = { git = 'https://github.com/tonlabs/ton-labs-overlay', tag = '0.6.48' }
+tokio = { features = [ 'rt-multi-thread' ], version = '1.5' }
+ton_api = { git = 'https://github.com/tonlabs/ton-labs-tl', package = 'ton_api', tag = '0.2.116' }
+ton_types = { git = 'https://github.com/tonlabs/ton-labs-types', tag = '1.10.12' }
 
 [dev-dependencies]
-ed25519 = "1.0"
-ed25519-dalek = "1.0"
-external-ip = "4.1"
-log4rs = "1.0"
-serde_json = "1.0"
+ed25519 = '1.0'
+ed25519-dalek = '1.0'
+external-ip = '4.1'
+log4rs = '1.0'
+serde_json = '1.0'
 
 [features]
-compression = ["adnl/compression"]
-telemetry = ["adnl/telemetry", "overlay/telemetry"]
+compression = [ 'adnl/compression' ]
+telemetry = [ 'adnl/telemetry', 'overlay/telemetry' ]
 
