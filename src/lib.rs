@@ -15,7 +15,7 @@ use adnl::{
     declare_counted,
     common::{
         add_counted_object_to_map_with_update, add_unbound_object_to_map, AdnlPeers, 
-        CountedObject, Counter, deserialize, get256, hash, hash_boxed, KeyId, KeyOption, 
+        CountedObject, Counter, deserialize, hash, hash_boxed, KeyId, KeyOption, 
         Query, QueryResult, serialize, serialize_inplace, Subscriber, TaggedTlObject, 
         Version, Wait
     }, 
@@ -53,7 +53,7 @@ use ton_api::{
         }
     }
 };
-use ton_types::{error, fail, Result};
+use ton_types::{error, fail, Result, UInt256};
 
 pub const TARGET: &str = "dht";
 
@@ -96,7 +96,7 @@ pub fn build_dht_node_info(ip: &str, key: &str, signature: &str) -> Result<Node>
     let signature = base64::decode(signature)?;
     let node = Node {
         id: Ed25519 {
-            key: ton::int256(key)
+            key: UInt256::with_array(key)
         }.into_boxed(),
         addr_list: AddressList {
             addrs: addrs.into(),
@@ -335,7 +335,7 @@ impl DhtNode {
         let query = TaggedTlObject {
             object: TLObject::new(
                 FindNode {
-                    key: ton::int256(*self.node_key.id().data()),
+                    key: UInt256::with_array(*self.node_key.id().data()),
                     k: 10
                 }
             ),
@@ -674,7 +674,7 @@ impl DhtNode {
 
     fn dht_key_from_key_id(id: &Arc<KeyId>, name: &str) -> DhtKey {
         DhtKey {
-            id: ton::int256(*id.data()),
+            id: UInt256::with_array(*id.data()),
             idx: 0,
             name: ton::bytes(name.as_bytes().to_vec())
         }
@@ -696,7 +696,7 @@ impl DhtNode {
         let query = TaggedTlObject {
             object: TLObject::new(
                 FindValue { 
-                    key: ton::int256(key),
+                    key: UInt256::with_array(key),
                     k: 6 
                 }
             ),
@@ -805,7 +805,7 @@ impl DhtNode {
     fn process_find_node(&self, query: &FindNode) -> Result<Nodes> {
         log::trace!(target: TARGET, "Process FindNode query {:?}", query);
         let key1 = self.node_key.id().data();
-        let key2 = get256(&query.key);
+        let key2 = query.key.as_slice();
         let mut dist = 0u8;
         let mut ret = Vec::new();
         for i in 0..32 {
@@ -847,7 +847,7 @@ impl DhtNode {
 
     fn process_find_value(&self, query: &FindValue) -> Result<DhtValueResult> {
         log::trace!(target: TARGET, "Process FindValue query {:?}", query);
-        let ret = if let Some(value) = self.search_dht_key(get256(&query.key)) {
+        let ret = if let Some(value) = self.search_dht_key(query.key.as_slice()) {
             ValueFound {
                 value: value.into_boxed()
             }.into_boxed()
