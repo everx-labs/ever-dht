@@ -4,7 +4,7 @@ description = 'DHT protocol library'
 edition = '2018'
 name = 'dht'
 resolver = '2'
-version = '0.5.60'
+version = '0.5.61'
 
 [workspace]
 
@@ -17,11 +17,11 @@ hex = '0.4'
 log = '0.4'
 rand = '0.8'
 sha2 = '0.9'
-adnl = { features = [ 'node' ], git = 'https://github.com/tonlabs/ton-labs-adnl', tag = '0.7.63' }
+adnl = { features = [ 'node' ], git = 'https://github.com/tonlabs/ton-labs-adnl', tag = '0.7.64' }
 lockfree = { git = 'https://github.com/tonlabs/lockfree.git' }
-overlay = { git = 'https://github.com/tonlabs/ton-labs-overlay', tag = '0.6.48' }
+overlay = { git = 'https://github.com/tonlabs/ton-labs-overlay', tag = '0.6.49' }
 tokio = { features = [ 'rt-multi-thread' ], version = '1.5' }
-ton_api = { git = 'https://github.com/tonlabs/ton-labs-tl', package = 'ton_api', tag = '0.2.116' }
+ton_api = { git = 'https://github.com/tonlabs/ton-labs-tl', package = 'ton_api', tag = '0.2.117' }
 ton_types = { git = 'https://github.com/tonlabs/ton-labs-types', tag = '1.10.12' }
 
 [dev-dependencies]
