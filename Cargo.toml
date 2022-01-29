@@ -8,7 +8,6 @@ version = '0.5.61'
 
 [workspace]
 
-
 [dependencies]
 async-trait = '0.1'
 base64 = '0.13'
@@ -34,4 +33,3 @@ serde_json = '1.0'
 [features]
 compression = [ 'adnl/compression' ]
 telemetry = [ 'adnl/telemetry', 'overlay/telemetry' ]
-
