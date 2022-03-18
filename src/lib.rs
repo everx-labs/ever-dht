@@ -14,25 +14,24 @@
 use adnl::{
     declare_counted,
     common::{
-        add_counted_object_to_map_with_update, add_unbound_object_to_map, AdnlPeers, 
-        CountedObject, Counter, deserialize, hash, hash_boxed, KeyId, KeyOption, 
-        Query, QueryResult, serialize, serialize_inplace, Subscriber, TaggedTlObject, 
-        Version, Wait
+        add_counted_object_to_map_with_update, add_unbound_object_to_map, AdnlPeers, CountedObject, 
+        Counter, hash, hash_boxed, Query, QueryResult, Subscriber, TaggedTlObject, Version, Wait
     }, 
     node::{AddressCache, AddressCacheIterator, AdnlNode, IpAddress}
 };
 #[cfg(feature = "telemetry")]
-use adnl::{common::tag_from_boxed_type, telemetry::Metric};
+use adnl::telemetry::Metric;
+use ever_crypto::{Ed25519KeyOption, KeyId, KeyOption};
 use overlay::{OverlayId, OverlayShortId, OverlayUtils};
 use rand::Rng;
 use std::{
     convert::TryInto, fmt::{self, Display, Formatter}, mem, ops::Deref, 
-    sync::{Arc, atomic::AtomicU64}
+    sync::{Arc, atomic::{AtomicU8, AtomicU64, Ordering}}
 };
 #[cfg(feature = "telemetry")]
-use std::{sync::atomic::Ordering, time::Instant};
+use std::time::Instant;
 use ton_api::{
-    IntoBoxed, 
+    IntoBoxed, deserialize_boxed, serialize_boxed, serialize_boxed_inplace,
     ton::{
         self, PublicKey, TLObject, 
         adnl::{AddressList as AddressListBoxed, addresslist::AddressList}, 
@@ -53,6 +52,8 @@ use ton_api::{
         }
     }
 };
+#[cfg(feature = "telemetry")]
+use ton_api::tag_from_boxed_type;
 use ton_types::{error, fail, Result, UInt256};
 
 pub const TARGET: &str = "dht";
@@ -62,7 +63,7 @@ macro_rules! sign {
     ($data:expr, $key:expr) => {
         {
             let data = $data.into_boxed();
-            let mut buf = serialize(&data)?;
+            let mut buf = serialize_boxed(&data)?;
             let signature = $key.sign(&buf)?;
             buf.truncate(0);
             buf.extend_from_slice(&signature);
@@ -79,7 +80,7 @@ macro_rules! verify {
         {
             let signature = mem::take(&mut $data.signature.0);
             let data = $data.into_boxed();
-            let buf = serialize(&data)?;
+            let buf = serialize_boxed(&data)?;
             $key.verify(&buf[..], &signature[..])?;
             data.only()
         }
@@ -92,7 +93,7 @@ pub fn build_dht_node_info(ip: &str, key: &str, signature: &str) -> Result<Node>
         fail!("Bad public key length")
     }
     let key: [u8; 32] = key.as_slice().try_into()?;
-    let addrs = vec![IpAddress::from_string(ip)?.into_udp().into_boxed()];
+    let addrs = vec![IpAddress::from_versioned_string(ip, None)?.into_udp().into_boxed()];
     let signature = base64::decode(signature)?;
     let node = Node {
         id: Ed25519 {
@@ -210,8 +211,9 @@ struct DhtAlloc {
 pub struct DhtNode {
     adnl: Arc<AdnlNode>,
     buckets: lockfree::map::Map<u8, lockfree::map::Map<Arc<KeyId>, NodeObject>>,
+    bad_peers: lockfree::map::Map<Arc<KeyId>, AtomicU8>,
     known_peers: AddressCache,
-    node_key: Arc<KeyOption>,
+    node_key: Arc<dyn KeyOption>,
     query_prefix: Vec<u8>,
     storage: lockfree::map::Map<DhtKeyId, ValueObject>,
     #[cfg(feature = "telemetry")]
@@ -235,6 +237,7 @@ impl DhtNode {
         4, 3, 2, 2, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0
     ];
 
+    const MAX_FAIL_COUNT: u8 = 5;
     const MAX_PEERS: u32 = 65536;
     const MAX_TASKS: usize = 5; 
     const TIMEOUT_VALUE: i32 = 3600; // Seconds
@@ -254,6 +257,7 @@ impl DhtNode {
         let mut ret = Self {
             adnl,
             buckets: lockfree::map::Map::new(),
+            bad_peers: lockfree::map::Map::new(), 
             known_peers: AddressCache::with_limit(Self::MAX_PEERS),
             node_key,
             query_prefix: Vec::new(),
@@ -275,8 +279,8 @@ impl DhtNode {
         let query = DhtQuery { 
             node: ret.sign_local_node()?
         };
-        serialize_inplace(&mut ret.query_prefix, &query)?;
-        Ok(Arc::new(ret))                                             
+        serialize_boxed_inplace(&mut ret.query_prefix, &query)?;
+        Ok(Arc::new(ret))
     }
 
     /// Add DHT peer 
@@ -285,10 +289,16 @@ impl DhtNode {
             log::warn!(target: TARGET, "Error when verifying DHT peer: {}", e);
             return Ok(None)
         }
+        let addr = if let Some(addr) = AdnlNode::parse_address_list(&peer.addr_list)? {
+            addr
+        } else {
+            log::warn!(target: TARGET, "Wrong DHT peer address {:?}", peer.addr_list);
+            return Ok(None)
+        };
         let ret = self.adnl.add_peer(
             self.node_key.id(), 
-            &AdnlNode::parse_address_list(&peer.addr_list)?, 
-            &Arc::new(KeyOption::from_tl_public_key(&peer.id)?)
+            &addr, 
+            &Ed25519KeyOption::from_public_key_tl(&peer.id)?
         )?;
         let ret = if let Some(ret) = ret {
             ret
@@ -326,6 +336,8 @@ impl DhtNode {
                     }
                 )?;
             }
+        } else {
+            self.set_good_peer(&ret)
         }
         Ok(Some(ret))
     }
@@ -361,11 +373,11 @@ impl DhtNode {
     pub async fn fetch_address(
         &self,
         key_id: &Arc<KeyId>
-    ) -> Result<Option<(IpAddress, KeyOption)>> {
+    ) -> Result<Option<(IpAddress, Arc<dyn KeyOption>)>> {
         let key = Self::dht_key_from_key_id(key_id, "address");
         let value = self.search_dht_key(&hash(key)?);
         if let Some(value) = value {
-            let object = deserialize(&value.value.0)?;
+            let object = deserialize_boxed(&value.value.0)?;
             Ok(Some(Self::parse_value_as_address(value.key, object)?))
         } else {
             Ok(None)
@@ -376,7 +388,7 @@ impl DhtNode {
     pub async fn find_address(
         dht: &Arc<Self>, 
         key_id: &Arc<KeyId>
-    ) -> Result<(IpAddress, KeyOption)> {
+    ) -> Result<(IpAddress, Arc<dyn KeyOption>)> {
         let mut addr_list = DhtNode::find_value(
             dht, 
             Self::dht_key_from_key_id(key_id, "address"),
@@ -436,7 +448,7 @@ impl DhtNode {
             );
             while let Some(node) = nodes.pop() {
                 let node = node.clone();
-                let key = KeyOption::from_tl_public_key(&node.id)?;
+                let key = Ed25519KeyOption::from_public_key_tl(&node.id)?;
                 if !cache.put(key.id().clone())? {
                     log::trace!(
                         target: TARGET, 
@@ -495,12 +507,22 @@ impl DhtNode {
 
     /// Get DHT peer via iterator
     pub fn get_known_peer(&self, iter: &mut Option<AddressCacheIterator>) -> Option<Arc<KeyId>> {
-        if let Some(iter) = iter {
-            self.known_peers.next(iter)
-        } else {
-            let (new_iter, first) = self.known_peers.first();
-            iter.replace(new_iter);
-            first
+        loop {
+            let ret = if let Some(iter) = iter {
+                self.known_peers.next(iter)
+            } else {
+                let (new_iter, first) = self.known_peers.first();
+                iter.replace(new_iter);
+                first
+            };
+            if let Some(peer) = &ret {
+                if let Some(count) = self.bad_peers.get(peer) {
+                    if count.val().load(Ordering::Relaxed) >= Self::MAX_FAIL_COUNT {
+                        continue
+                    }
+                }
+            }
+            break ret
         }
     }
 
@@ -551,7 +573,7 @@ impl DhtNode {
     }
 
     /// Node key
-    pub fn key(&self) -> &Arc<KeyOption> {
+    pub fn key(&self) -> &Arc<dyn KeyOption> {
         &self.node_key
     }
 
@@ -577,12 +599,18 @@ impl DhtNode {
     }
 
     /// Store own IP address
-    pub async fn store_ip_address(dht: &Arc<Self>, key: &Arc<KeyOption>) -> Result<bool> {
+    pub async fn store_ip_address(dht: &Arc<Self>, key: &Arc<dyn KeyOption>) -> Result<bool> {
         log::debug!(target: TARGET, "Storing key ID {}", key.id());
-        let value = serialize(&dht.adnl.build_address_list(None)?.into_boxed())?;
+        let addr_list = dht.adnl.build_address_list(None)?;
+        let addr = AdnlNode::parse_address_list(&addr_list)?.ok_or_else(
+            || error!("INTERNAL ERROR: cannot parse generated address list")
+        )?;
+        let value = serialize_boxed(&addr_list.into_boxed())?;
         let value = Self::sign_value("address", &value[..], key)?;
         let key = Self::dht_key_from_key_id(key.id(), "address");
-        dht.process_store_signed_value(hash(key.clone())?, value.clone())?;
+        let key_id = hash(key.clone())?;
+        log::debug!(target: TARGET, "Storing DHT key ID {}", base64::encode(&key_id[..]));
+        dht.process_store_signed_value(key_id, value.clone())?;
         Self::store_value(
             dht,
             key,
@@ -592,16 +620,24 @@ impl DhtNode {
             |mut objects| {
                 while let Some((_, object)) = objects.pop() {
                     if let Ok(addr_list) = object.downcast::<AddressListBoxed>() {
-                        let ip = AdnlNode::parse_address_list(&addr_list.only())?;
-                        if &ip == dht.adnl.ip_address() {
-                            log::debug!(target: TARGET, "Checked stored address {:?}", ip);
-                            return Ok(true);
+                        let addr_list = addr_list.only();
+                        if let Some(ip) = AdnlNode::parse_address_list(&addr_list)? {
+                            if &ip == &addr { //dht.adnl.ip_address() {
+                                log::debug!(target: TARGET, "Checked stored address {:?}", ip);
+                                return Ok(true);
+                            } else {
+                                log::warn!(
+                                    target: TARGET, 
+                                    "Found another stored address {:?}, expected {:?}", 
+                                    ip,
+                                    dht.adnl.ip_address()
+                                )
+                            }
                         } else {
                             log::warn!(
                                 target: TARGET, 
-                                "Found another stored address {:?}, expected {:?}", 
-                                ip,
-                                dht.adnl.ip_address()
+                                "Found some wrong address list {:?}",
+                                addr_list
                             )
                         }
                     } else {
@@ -638,7 +674,7 @@ impl DhtNode {
             },
             ttl: Version::get() + Self::TIMEOUT_VALUE,
             signature: ton::bytes::default(),
-            value: ton::bytes(serialize(&nodes)?)
+            value: ton::bytes(serialize_boxed(&nodes)?)
         };
         dht.process_store_overlay_nodes(hash(key.clone())?, value.clone())?;
         Self::store_value(
@@ -666,7 +702,7 @@ impl DhtNode {
     }
 
     fn deserialize_overlay_nodes(value: &[u8]) -> Result<Vec<OverlayNode>> {
-        let nodes = deserialize(value)?
+        let nodes = deserialize_boxed(value)?
             .downcast::<OverlayNodesBoxed>()
             .map_err(|object| error!("Wrong OverlayNodes: {:?}", object))?;
         Ok(nodes.only().nodes.0)
@@ -792,10 +828,12 @@ impl DhtNode {
     fn parse_value_as_address(
         key: DhtKeyDescription, 
         value: TLObject
-    ) -> Result<(IpAddress, KeyOption)> {
+    ) -> Result<(IpAddress, Arc<dyn KeyOption>)> {
         if let Ok(addr_list) = value.downcast::<AddressListBoxed>() {
-            let ip_address = AdnlNode::parse_address_list(&addr_list.only())?;
-            let key = KeyOption::from_tl_public_key(&key.id)?;
+            let ip_address = AdnlNode::parse_address_list(&addr_list.only())?.ok_or_else(
+                || error!("Wrong address list in DHT search")
+            )?;
+            let key = Ed25519KeyOption::from_public_key_tl(&key.id)?;
             Ok((ip_address, key))
         } else {
             fail!("Address list type mismatch in DHT search")
@@ -956,7 +994,7 @@ impl DhtNode {
                 self.telemetry.values.update(
                     self.allocated.values.load(Ordering::Relaxed)
                 );
-                ret.object.value = ton::bytes(serialize(&nodes)?);
+                ret.object.value = ton::bytes(serialize_boxed(&nodes)?);
                 log::trace!(target: TARGET, "Store Overlay Nodes result {:?}", ret.object);
                 Ok(Some(ret))
             }
@@ -993,7 +1031,8 @@ impl DhtNode {
         query: &TaggedTlObject
     ) -> Result<Option<TLObject>> {
         let peers = AdnlPeers::with_keys(self.node_key.id().clone(), dst.clone());
-        self.adnl.clone().query(query, &peers, None).await
+        let result = self.adnl.clone().query(query, &peers, None).await?;
+        self.set_query_result(result, dst)
     } 
 
     async fn query_with_prefix(
@@ -1002,12 +1041,13 @@ impl DhtNode {
         query: &TaggedTlObject
     ) -> Result<Option<TLObject>> {
         let peers = AdnlPeers::with_keys(self.node_key.id().clone(), dst.clone());
-        self.adnl.clone()
+        let result = self.adnl.clone()
             .query_with_prefix(Some(&self.query_prefix[..]), query, &peers, None)
-            .await
+            .await?;
+        self.set_query_result(result, dst)
     } 
 
-   fn search_dht_key(&self, key: &DhtKeyId) -> Option<DhtValue> { 
+    fn search_dht_key(&self, key: &DhtKeyId) -> Option<DhtValue> { 
         let version = Version::get();
         if let Some(value) = self.storage.get(key) {
             if value.val().object.ttl > version {
@@ -1019,10 +1059,54 @@ impl DhtNode {
             None
         }
     }
+
+    fn set_good_peer(&self, peer: &Arc<KeyId>) {
+        loop {
+            if let Some(count) = self.bad_peers.get(peer) {
+                let cnt = count.val().load(Ordering::Relaxed);
+                if cnt >= Self::MAX_FAIL_COUNT {
+                    if count.val().compare_exchange(
+                        cnt, 
+                        cnt - 1, 
+                        Ordering::Relaxed, 
+                        Ordering::Relaxed
+                    ).is_err() {
+                        continue
+                    }
+                    log::info!(target: TARGET, "Make DHT peer {} feel good {}", peer, cnt - 1);
+                }
+            }
+            break
+        }
+    }
+
+    fn set_query_result(
+        &self, 
+        result: Option<TLObject>, 
+        peer: &Arc<KeyId>
+    ) -> Result<Option<TLObject>> {
+        if result.is_some() {
+            self.set_good_peer(peer)
+        } else {
+            loop {
+                if let Some(count) = self.bad_peers.get(peer) {
+                    let cnt = count.val().fetch_add(2, Ordering::Relaxed);
+                    log::info!(target: TARGET, "Make DHT peer {} feel bad {}", peer, cnt + 2);
+                    break
+                }
+                add_unbound_object_to_map(
+                    &self.bad_peers,
+                    peer.clone(),
+                    || Ok(AtomicU8::new(0))
+                )?;
+            }
+        }
+        Ok(result)
+    }
     
-    fn sign_key_description(name: &str, key: &Arc<KeyOption>) -> Result<DhtKeyDescription> {
+    fn sign_key_description(name: &str, key: &Arc<dyn KeyOption>) -> Result<DhtKeyDescription> {
         let key_description = DhtKeyDescription {
-            id: key.into_tl_public_key()?,
+            id: key.into_public_key_tl()?,
             key: Self::dht_key_from_key_id(key.id(), name),
             signature: ton::bytes::default(),
             update_rule: UpdateRule::Dht_UpdateRule_Signature
@@ -1032,7 +1116,7 @@ impl DhtNode {
 
     fn sign_local_node(&self) -> Result<Node> {
         let local_node = Node {
-            id: self.node_key.into_tl_public_key()?,
+            id: self.node_key.into_public_key_tl()?,
             addr_list: self.adnl.build_address_list(None)?,
             signature: ton::bytes::default(),
             version: Version::get()
@@ -1040,7 +1124,7 @@ impl DhtNode {
         Ok(sign!(local_node, self.node_key))
     }
 
-    fn sign_value(name: &str, value: &[u8], key: &Arc<KeyOption>) -> Result<DhtValue> {
+    fn sign_value(name: &str, value: &[u8], key: &Arc<dyn KeyOption>) -> Result<DhtValue> {
         let value = DhtValue {
             key: Self::sign_key_description(name, key)?,
             ttl: Version::get() + Self::TIMEOUT_VALUE,
@@ -1067,12 +1151,13 @@ impl DhtNode {
             #[cfg(feature = "telemetry")]
             tag: dht.tag_store
         };
-        let query = Arc::new(query); 
-        let (mut iter, mut peer) = dht.known_peers.first();
-        let (wait, mut queue_reader) = Wait::new();
+        let query = Arc::new(query);
+        let mut iter = None;
+        let mut peer = dht.get_known_peer(&mut iter);
         while peer.is_some() {
+            let (wait, mut queue_reader) = Wait::new();
             while let Some(next) = peer {
-                peer = dht.known_peers.next(&mut iter);
+                peer = dht.get_known_peer(&mut iter);
                 let dht = dht.clone();  
                 let query = query.clone();
                 let wait = wait.clone();
@@ -1115,7 +1200,7 @@ impl DhtNode {
             if check_vals(vals)? {
                 return Ok(true)
             }
-            peer = dht.known_peers.next(&mut iter);
+            peer = dht.get_known_peer(&mut iter);
         }
         Ok(false)
     }
@@ -1138,7 +1223,7 @@ impl DhtNode {
                         "Found value for DHT key ID {}: {:?}/{:?}", 
                         base64::encode(&key[..]), value.key, value.value
                     );
-                    let object = deserialize(&value.value.0)?;
+                    let object = deserialize_boxed(&value.value.0)?;
                     if check(&object) {
                         return Ok(Some((value.key, object)))
                     } 
@@ -1171,14 +1256,14 @@ impl DhtNode {
     }
 
     fn verify_other_node(&self, node: &Node) -> Result<()> {
-        let other_key = KeyOption::from_tl_public_key(&node.id)?;
+        let other_key = Ed25519KeyOption::from_public_key_tl(&node.id)?;
         let mut node = node.clone();
         verify!(node, other_key);
         Ok(())
     }
 
     fn verify_value(&self, value: &DhtValue) -> Result<()> {
-        let other_key = KeyOption::from_tl_public_key(&value.key.id)?;
+        let other_key = Ed25519KeyOption::from_public_key_tl(&value.key.id)?;
         let mut key = value.key.clone();
         verify!(key, other_key);
         let mut value = value.clone();
