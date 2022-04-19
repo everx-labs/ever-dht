@@ -4,7 +4,7 @@ description = 'DHT protocol library'
 edition = '2018'
 name = 'dht'
 resolver = '2'
-version = '0.5.62'
+version = '0.5.63'
 
 [workspace]
 
@@ -15,13 +15,13 @@ failure = '0.1'
 hex = '0.4'
 log = '0.4'
 rand = '0.8'
-adnl = { features = [ 'node' ], git = 'https://github.com/tonlabs/ton-labs-adnl', tag = '0.7.67' }
-ever-crypto = { git = 'https://github.com/tonlabs/ever-labs-crypto.git', tag = '0.1.7' }
+adnl = { features = [ 'node' ], git = 'https://github.com/tonlabs/ton-labs-adnl', tag = '0.7.68' }
+ever-crypto = { git = 'https://github.com/tonlabs/ever-labs-crypto.git', tag = '0.1.8' }
 lockfree = { git = 'https://github.com/tonlabs/lockfree.git' }
-overlay = { git = 'https://github.com/tonlabs/ton-labs-overlay', tag = '0.6.50' }
+overlay = { git = 'https://github.com/tonlabs/ton-labs-overlay', tag = '0.6.51' }
 tokio = { features = [ 'rt-multi-thread' ], version = '1.5' }
-ton_api = { git = 'https://github.com/tonlabs/ton-labs-tl', package = 'ton_api', tag = '0.2.120' }
-ton_types = { git = 'https://github.com/tonlabs/ton-labs-types', tag = '1.10.12' }
+ton_api = { git = 'https://github.com/tonlabs/ton-labs-tl.git', package = 'ton_api', tag = '0.2.120' }
+ton_types = { git = 'https://github.com/tonlabs/ton-labs-types.git', tag = '1.10.13' }
 
 [dev-dependencies]
 external-ip = '4.1'
