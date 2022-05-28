@@ -16,7 +16,7 @@ hex = '0.4'
 log = '0.4'
 rand = '0.8'
 adnl = { features = [ 'node' ], git = 'https://github.com/tonlabs/ton-labs-adnl', tag = '0.7.73' }
-ever-crypto = { git = 'https://github.com/tonlabs/ever-labs-crypto.git', tag = '0.1.21' }
+ever-crypto = { git = 'https://github.com/tonlabs/ever-labs-crypto.git', tag = '0.1.22' }
 lockfree = { git = 'https://github.com/tonlabs/lockfree.git' }
 overlay = { git = 'https://github.com/tonlabs/ton-labs-overlay', tag = '0.6.57' }
 tokio = { features = [ 'rt-multi-thread' ], version = '1.5' }
