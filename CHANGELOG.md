@@ -2,9 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
-## Version: 0.5.67
+## Version: 0.5.68
 
 ### New
+ - Update Cargo.toml
+ - Update Cargo.toml
+ - Update libraries
 
 
 
