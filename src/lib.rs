@@ -87,7 +87,12 @@ macro_rules! verify {
     }
 }
 
-pub fn build_dht_node_info(ip: &str, key: &str, signature: &str) -> Result<Node> {
+pub fn build_dht_node_info_with_timestamp(
+    ip: &str, 
+    key: &str, 
+    signature: &str,
+    timestamp: Option<i32>
+) -> Result<Node> {
     let key = base64::decode(key)?;
     if key.len() != 32 {
         fail!("Bad public key length")
@@ -101,15 +106,20 @@ pub fn build_dht_node_info(ip: &str, key: &str, signature: &str) -> Result<Node>
         }.into_boxed(),
         addr_list: AddressList {
             addrs: addrs.into(),
-            version: 0,
-            reinit_date: 0,
+            version: timestamp.unwrap_or(0),
+            reinit_date: timestamp.unwrap_or(0),
             priority: 0,
             expire_at: 0
         },
-        version: -1,
+        version: timestamp.unwrap_or(-1),
         signature: ton::bytes(signature)
     };
     Ok(node)
+}
+
+#[deprecated(note = "Use build_dht_node_info_with_timestamp")]
+pub fn build_dht_node_info(ip: &str, key: &str, signature: &str) -> Result<Node> {
+    build_dht_node_info_with_timestamp(ip, key, signature, None)
 }
 
 pub struct DhtIterator {
