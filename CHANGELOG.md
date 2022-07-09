@@ -2,10 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
-## Version: 0.5.71
+## Version: 0.5.72
 
 ### New
 
+
+## Version: 0.5.72
+
+### New
+
+- Changed API for DHT overlay node address search
 
 ## Version: 0.5.70
 
