@@ -398,7 +398,7 @@ impl DhtNode {
     pub async fn find_address(
         dht: &Arc<Self>, 
         key_id: &Arc<KeyId>
-    ) -> Result<(IpAddress, Arc<dyn KeyOption>)> {
+    ) -> Result<Option<(IpAddress, Arc<dyn KeyOption>)>> {
         let mut addr_list = DhtNode::find_value(
             dht, 
             Self::dht_key_from_key_id(key_id, "address"),
@@ -407,9 +407,9 @@ impl DhtNode {
             &mut None
         ).await?;
         if let Some((key, addr_list)) = addr_list.pop() {
-            Self::parse_value_as_address(key, addr_list) 
+            Ok(Some(Self::parse_value_as_address(key, addr_list)?))
         } else {
-            fail!("No address found for {}", key_id)
+            Ok(None)
         }
     }
 
@@ -472,21 +472,33 @@ impl DhtNode {
                 wait.request();
                 tokio::spawn(
                     async move {
-                        if let Ok((ip, _)) = DhtNode::find_address(&dht, key.id()).await {
-                            log::debug!(
-                                target: TARGET, 
-                                "-------- Got Overlay node {} IP: {}, key: {}", 
-                                key.id(), ip, 
-                                base64::encode(key.pub_key().unwrap_or(&[0u8; 32]))
-                            );
-                            wait.respond(Some((Some(ip), node)))
-                        } else {
-                            log::trace!(
-                                target: TARGET, 
-                                "-------- Overlay node {} not found", 
-                                key.id()
-                            );
-                            wait.respond(Some((None, node))) 
+                        match DhtNode::find_address(&dht, key.id()).await {
+                            Ok(Some((ip, _))) => {
+                                log::debug!(
+                                    target: TARGET, 
+                                    "-------- Got Overlay node {} IP: {}, key: {}", 
+                                    key.id(), ip, 
+                                    base64::encode(key.pub_key().unwrap_or(&[0u8; 32]))
+                                );
+                                wait.respond(Some((Some(ip), node)))
+                            },
+                            Ok(None) => {
+                                log::trace!(
+                                    target: TARGET, 
+                                    "-------- Overlay node {} not found", 
+                                    key.id()
+                                );
+                                wait.respond(Some((None, node))) 
+                            },
+                            Err(e) => {
+                                log::trace!(
+                                    target: TARGET, 
+                                    "-------- Overlay node {} cannnot be found: {}", 
+                                    key.id(),
+                                    e
+                                );
+                                wait.respond(Some((None, node))) 
+                            }
                         }
                     }
                 );
