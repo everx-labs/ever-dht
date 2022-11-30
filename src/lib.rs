@@ -56,6 +56,8 @@ use ton_api::{
 use ton_api::tag_from_boxed_type;
 use ton_types::{error, fail, Result, UInt256};
 
+include!("../common/src/info.rs");
+
 pub const TARGET: &str = "dht";
 
 #[macro_export]
