@@ -4,7 +4,7 @@ description = 'DHT protocol library'
 edition = '2021'
 name = 'dht'
 resolver = '2'
-version = '0.5.110'
+version = '0.5.111'
 
 [workspace]
 
