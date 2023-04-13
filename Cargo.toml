@@ -4,7 +4,7 @@ description = 'DHT protocol library'
 edition = '2021'
 name = 'dht'
 resolver = '2'
-version = '0.5.157'
+version = '0.5.158'
 
 [workspace]
 
@@ -16,13 +16,13 @@ failure = '0.1'
 hex = '0.4'
 log = '0.4'
 rand = '0.8'
-adnl = { features = [ 'node' ], git = 'https://github.com/tonlabs/ever-adnl.git', tag = '0.7.146' }
-ever-crypto = { git = 'https://github.com/tonlabs/ever-crypto.git', tag = '0.1.103' }
+adnl = { features = [ 'node' ], git = 'https://github.com/tonlabs/ever-adnl.git', tag = '0.7.147' }
+ever-crypto = { git = 'https://github.com/tonlabs/ever-crypto.git', tag = '0.1.104' }
 lockfree = { git = 'https://github.com/tonlabs/lockfree.git' }
-overlay = { git = 'https://github.com/tonlabs/ever-overlay.git', tag = '0.6.141' }
+overlay = { git = 'https://github.com/tonlabs/ever-overlay.git', tag = '0.6.142' }
 tokio = { features = [ 'rt-multi-thread' ], version = '1.5' }
-ton_api = { git = 'https://github.com/tonlabs/ever-tl.git', package = 'ton_api', tag = '0.2.190' }
-ton_types = { git = 'https://github.com/tonlabs/ever-types.git', tag = '2.0.1' }
+ton_api = { git = 'https://github.com/tonlabs/ever-tl.git', package = 'ton_api', tag = '0.2.191' }
+ton_types = { git = 'https://github.com/tonlabs/ever-types.git', tag = '2.0.2' }
 
 [features]
 telemetry = [ 'adnl/telemetry', 'overlay/telemetry' ]
