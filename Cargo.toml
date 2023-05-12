@@ -4,7 +4,7 @@ description = 'DHT protocol library'
 edition = '2021'
 name = 'dht'
 resolver = '2'
-version = '0.5.168'
+version = '0.5.169'
 
 [workspace]
 
@@ -16,12 +16,12 @@ failure = '0.1'
 hex = '0.4'
 log = '0.4'
 rand = '0.8'
-adnl = { features = [ 'node' ], git = 'https://github.com/tonlabs/ever-adnl.git', tag = '0.7.157' }
-ever-crypto = { git = 'https://github.com/tonlabs/ever-crypto.git', tag = '0.1.114' }
+adnl = { features = [ 'node' ], git = 'https://github.com/tonlabs/ever-adnl.git', tag = '0.7.158' }
+ever-crypto = { git = 'https://github.com/tonlabs/ever-crypto.git', tag = '0.1.115' }
 lockfree = { git = 'https://github.com/tonlabs/lockfree.git' }
-overlay = { git = 'https://github.com/tonlabs/ever-overlay.git', tag = '0.6.152' }
+overlay = { git = 'https://github.com/tonlabs/ever-overlay.git', tag = '0.6.153' }
 tokio = { features = [ 'rt-multi-thread' ], version = '1.5' }
-ton_api = { git = 'https://github.com/tonlabs/ever-tl.git', package = 'ton_api', tag = '0.2.201' }
+ton_api = { git = 'https://github.com/tonlabs/ever-tl.git', package = 'ton_api', tag = '0.2.203' }
 ton_types = { git = 'https://github.com/tonlabs/ever-types.git', tag = '2.0.5' }
 
 [features]
