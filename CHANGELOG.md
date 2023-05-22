@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## Version 0.5.177
+
+- Get rid of workspace
+- Increase package version
+
 ## Version: 0.5.72
 
 ### New
