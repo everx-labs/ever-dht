@@ -1114,8 +1114,11 @@ impl DhtNode {
         } else {
             loop {
                 if let Some(count) = self.bad_peers.get(peer) {
-                    let cnt = count.val().fetch_add(2, Ordering::Relaxed);
-                    log::info!(target: TARGET, "Make DHT peer {} feel bad {}", peer, cnt + 2);
+                    let mut cnt = count.val().load(Ordering::Relaxed);
+                    if cnt <= Self::MAX_FAIL_COUNT {
+                        cnt = count.val().fetch_add(2, Ordering::Relaxed) + 2;
+                    }
+                    log::info!(target: TARGET, "Make DHT peer {} feel bad {}", peer, cnt);
                     break
                 }
                 add_unbound_object_to_map(
