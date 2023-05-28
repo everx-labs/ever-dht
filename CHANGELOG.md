@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## Version 0.5.187
+
+- Use global config to verify on mainnet
+- Increase package version
+
 ## Version 0.5.186
 
 - Limit maximum score of bad peer
