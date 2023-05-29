@@ -25,8 +25,8 @@ use ever_crypto::{Ed25519KeyOption, KeyId, KeyOption};
 use overlay::{OverlayId, OverlayShortId, OverlayUtils};
 use rand::Rng;
 use std::{
-    convert::TryInto, fmt::{self, Display, Formatter}, mem, ops::Deref, 
-    sync::{Arc, atomic::{AtomicU8, AtomicU64, Ordering}}
+    collections::VecDeque, convert::TryInto, fmt::{self, Display, Formatter}, mem, 
+    ops::Deref, sync::{Arc, atomic::{AtomicU8, AtomicU64, Ordering}}
 };
 #[cfg(feature = "telemetry")]
 use std::time::Instant;
@@ -126,16 +126,16 @@ pub fn build_dht_node_info(ip: &str, key: &str, signature: &str) -> Result<Node>
 
 pub struct DhtIterator {
     iter: Option<AddressCacheIterator>, 
-    key_id: DhtKeyId,
+    key_id: Arc<DhtKeyId>,
     order: Vec<(u8, Arc<KeyId>)>
 }
 
 impl DhtIterator {
 
-    fn with_key_id(dht: &DhtNode, key_id: DhtKeyId) -> Self {
+    fn with_key_id(dht: &DhtNode, key_id: Arc<DhtKeyId>) -> Self {
         let mut ret = Self {
             iter: None,
-            key_id, 
+            key_id,
             order: Vec::new() 
         };
         ret.update(dht);
@@ -149,9 +149,19 @@ impl DhtIterator {
             dht.get_known_peer(&mut self.iter)
         };
         while let Some(peer) = next {
-            let affinity = DhtNode::get_affinity(peer.data(), &self.key_id);
+            let mut affinity = DhtNode::get_affinity(peer.data(), &self.key_id);
+            if let Some(score) = dht.bad_peers.get(&peer) {
+                let score = score.val().load(Ordering::Relaxed);
+                let new_affinity = affinity.saturating_sub(score);
+                log::debug!(
+                    target: TARGET, 
+                    "Bad DHT peer {}, score {} affinity {} -> {}", 
+                    peer, score, affinity, new_affinity
+                );
+                affinity = new_affinity;
+            }
             let add = if let Some((top_affinity, _)) = self.order.last() {
-                (*top_affinity <= affinity) || (self.order.len() < DhtNode::MAX_TASKS) 
+                (*top_affinity <= affinity) || (self.order.len() < DhtNode::MAX_TASKS as usize)
             } else {
                 true
             };
@@ -163,7 +173,7 @@ impl DhtIterator {
         self.order.sort_unstable_by_key(|(affinity, _)| *affinity);
         if let Some((top_affinity, _)) = self.order.last() {
             let mut drop_to = 0;
-            while self.order.len() - drop_to > DhtNode::MAX_TASKS {
+            while self.order.len() - drop_to > DhtNode::MAX_TASKS as usize {
                 let (affinity, _) = self.order[drop_to];
                 if affinity < *top_affinity {
                     drop_to += 1
@@ -174,7 +184,7 @@ impl DhtIterator {
             self.order.drain(0..drop_to);
         }
         if log::log_enabled!(log::Level::Debug) {
-            let mut out = format!("DHT search list for {}:\n", base64::encode(&self.key_id));
+            let mut out = format!("DHT search list for {}:\n", base64::encode(&self.key_id[..]));
             for (affinity, key_id) in self.order.iter().rev() {
                 out.push_str(format!("order {} - {}\n", affinity, key_id).as_str())
             }
@@ -187,14 +197,41 @@ impl DhtIterator {
 impl Display for DhtIterator {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         if let Some(iter) = &self.iter {
-            write!(f, "{} peers remained of {:?}", self.order.len(), iter)
+            write!(f, "{} DHT peer(s) selected of {:?}", self.order.len(), iter)
         } else {
-            write!(f, "no peers yet")
+            write!(f, "no DHT peers yet")
         }
     }
 }
 
 type DhtKeyId = [u8; 32];
+
+struct DhtKeyIdDumper {
+    dump: Option<String>
+}
+
+impl DhtKeyIdDumper {
+    fn with_params(level: log::Level, src: &DhtKeyId) -> Self {
+        let dump = if log::log_enabled!(level) {
+            Some(base64::encode(src))
+        } else {
+            None
+        };
+        Self {
+            dump
+        }
+    }
+}
+
+impl Display for DhtKeyIdDumper {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        if let Some(dump) = &self.dump {
+            write!(f, "{}", dump)
+        } else {
+            fmt::Result::Ok(())
+        }
+    }
+}	
 
 declare_counted!(
     struct NodeObject {
@@ -208,6 +245,12 @@ declare_counted!(
     }
 );
 
+#[derive(Clone)]
+pub enum DhtSearchPolicy {
+    FastSearch(u8),    // Parameter: concurrency level 
+    FullSearch(u8)     // Parameter: concurrency level
+}
+
 #[cfg(feature = "telemetry")]
 struct DhtTelemetry {
     peers: Arc<Metric>,
@@ -217,6 +260,23 @@ struct DhtTelemetry {
 struct DhtAlloc {
     peers: Arc<AtomicU64>,
     values: Arc<AtomicU64>
+}
+
+struct OverlayNodeResolveContext {
+    node: OverlayNode,
+    key: Arc<dyn KeyOption>,
+    search: Option<AddressSearchContext>
+}
+
+pub struct AddressSearchContext {
+    iter: Option<DhtIterator>,
+    key_id: Arc<DhtKeyId>,
+}
+
+pub struct OverlayNodesSearchContext {
+    key_id: Arc<DhtKeyId>,
+    search: VecDeque<OverlayNodeResolveContext>,
+    stored: AddressCache
 }
 
 /// DHT Node
@@ -251,7 +311,7 @@ impl DhtNode {
 
     const MAX_FAIL_COUNT: u8 = 5;
     const MAX_PEERS: u32 = 65536;
-    const MAX_TASKS: usize = 5; 
+    const MAX_TASKS: u8 = 5;
     const TIMEOUT_VALUE: i32 = 3600; // Seconds
 
     /// Constructor 
@@ -401,12 +461,40 @@ impl DhtNode {
         dht: &Arc<Self>, 
         key_id: &Arc<KeyId>
     ) -> Result<Option<(IpAddress, Arc<dyn KeyOption>)>> {
-        let mut addr_list = DhtNode::find_value(
+        DhtNode::find_address_with_context(
             dht, 
-            Self::dht_key_from_key_id(key_id, "address"),
+            key_id, 
+            &mut None, 
+            DhtSearchPolicy::FullSearch(Self::MAX_TASKS)
+        ).await
+    }
+
+    /// Find address of node with given key ID 
+    pub async fn find_address_with_context(
+        dht: &Arc<Self>, 
+        key_id: &Arc<KeyId>,
+        ctx_opt: &mut Option<AddressSearchContext>,
+        policy: DhtSearchPolicy
+    ) -> Result<Option<(IpAddress, Arc<dyn KeyOption>)>> {
+        if ctx_opt.is_none() {
+            let key_id = Arc::new(hash(Self::dht_key_from_key_id(key_id, "address"))?);
+            ctx_opt.replace(
+                AddressSearchContext {
+                    iter: None,
+                    key_id
+                }
+            );
+        }
+        let Some(ctx) = ctx_opt else {
+            fail!("INTERNAL ERROR: cannot make address search context")
+        };
+        let mut addr_list = DhtNode::find_value(
+            dht,
+            &ctx.key_id,
             |object| object.is::<AddressListBoxed>(),
+            &policy,
             false, 
-            &mut None
+            &mut ctx.iter
         ).await?;
         if let Some((key, addr_list)) = addr_list.pop() {
             Ok(Some(Self::parse_value_as_address(key, addr_list)?))
@@ -421,97 +509,167 @@ impl DhtNode {
         overlay_id: &Arc<OverlayShortId>,
         iter: &mut Option<DhtIterator>
     ) -> Result<Vec<(IpAddress, OverlayNode)>> {
+        DhtNode::find_overlay_nodes_with_context(
+            dht, 
+            overlay_id, 
+            &mut None,
+            DhtSearchPolicy::FullSearch(Self::MAX_TASKS), 
+            iter
+        ).await
+    }
+
+    /// Get nodes of overlay with given ID, keeping search context
+    pub async fn find_overlay_nodes_with_context(
+        dht: &Arc<Self>, 
+        overlay_id: &Arc<OverlayShortId>,
+        ctx_search_opt: &mut Option<OverlayNodesSearchContext>,
+        policy: DhtSearchPolicy,
+        iter: &mut Option<DhtIterator>
+    ) -> Result<Vec<(IpAddress, OverlayNode)>> {
         let mut ret = Vec::new();
-        let mut nodes = Vec::new();
-        log::trace!(
+        if ctx_search_opt.is_none() {
+            let key_id = Arc::new(hash(Self::dht_key_from_key_id(overlay_id, "nodes"))?);
+            ctx_search_opt.replace(
+                OverlayNodesSearchContext {
+                    key_id,
+                    search: VecDeque::new(),
+                    stored: AddressCache::with_limit(Self::MAX_PEERS)
+                }
+            );
+        }
+        let Some(ctx_search) = ctx_search_opt else {
+            fail!("INTERNAL ERROR: cannot make overlay search context")
+        };
+        log::debug!(
             target: TARGET, 
             "-------- Overlay nodes search, {}", 
             if let Some(iter) = iter {
                 iter.to_string()
             } else {
-                format!("{} peers remained", dht.known_peers.count())
+                format!("{} DHT peer(s) to query", dht.known_peers.count())
             }
         );
+        let mut postponed = VecDeque::new();
         loop {
-            let mut nodes_lists = DhtNode::find_value(
-                dht, 
-                Self::dht_key_from_key_id(overlay_id, "nodes"),
-                |object| object.is::<OverlayNodesBoxed>(),
-                true, 
-                iter
-            ).await?;
-            if nodes_lists.is_empty() {
-                // No more results
-                break
-            }
-            while let Some((_, nodes_list)) = nodes_lists.pop() {
-                if let Ok(nodes_list) = nodes_list.downcast::<OverlayNodesBoxed>() {
-                    nodes.append(&mut nodes_list.only().nodes.0)
-                } else {
-                    fail!("INTERNAL ERROR: overlay nodes list type mismatch in search")
-                } 
+            if ctx_search.search.is_empty() {
+                let mut nodes_lists = DhtNode::find_value(
+                    dht,
+                    &ctx_search.key_id,
+                    |object| object.is::<OverlayNodesBoxed>(),
+                    &policy,
+                    true, 
+                    iter
+                ).await?;
+                if nodes_lists.is_empty() {
+                    // No more results
+                    break
+                }
+                while let Some((_, nodes_list)) = nodes_lists.pop() {
+                    if let Ok(nodes_list) = nodes_list.downcast::<OverlayNodesBoxed>() {
+                        for node in nodes_list.only().nodes.0 {
+                            let key = Ed25519KeyOption::from_public_key_tl(&node.id)?;
+                            ctx_search.search.push_back(
+                                OverlayNodeResolveContext {
+                                    node,
+                                    key,
+                                    search: None
+                                }
+                            )
+                        }
+                    } else {
+                        fail!("INTERNAL ERROR: overlay nodes list type mismatch in search")
+                    } 
+                }
+                ctx_search.search.append(&mut postponed);
             }
             let (wait, mut queue_reader) = Wait::new();
-            let cache = AddressCache::with_limit(Self::MAX_PEERS);
             log::debug!(
                 target: TARGET, 
-                "-------- Searching {} overlay nodes", 
-                nodes.len()
+                "-------- Overlay nodes search, {} ({} suspicious) nodes to resolve", 
+                ctx_search.search.len() + postponed.len(), 
+                postponed.len()
             );
-            while let Some(node) = nodes.pop() {
-                let node = node.clone();
-                let key = Ed25519KeyOption::from_public_key_tl(&node.id)?;
-                if !cache.put(key.id().clone())? {
+            let limit = match &policy {
+                DhtSearchPolicy::FastSearch(_) => 1,
+                DhtSearchPolicy::FullSearch(limit) => *limit
+            };
+            while let Some(mut ctx_resolve) = ctx_search.search.pop_front() {
+                if ctx_search.stored.contains(ctx_resolve.key.id()) {
                     log::trace!(
                         target: TARGET, 
-                        "-------- Overlay node {} already found", 
-                        key.id()
+                        "-------- Overlay nodes search, node {} already stored", 
+                        ctx_resolve.key.id()
                     );
                     continue
                 }
-                let dht = dht.clone();  
+                let dht = dht.clone();
+                let policy = policy.clone();
                 let wait = wait.clone();
-                wait.request();
+                let reqs = wait.request_immediate();
                 tokio::spawn(
                     async move {
-                        match DhtNode::find_address(&dht, key.id()).await {
+                        log::trace!(
+                            target: TARGET, 
+                            "-------- Overlay nodes search, try resolve node {}", 
+                            ctx_resolve.key.id()
+                        );
+                        match DhtNode::find_address_with_context(
+                            &dht, 
+                            ctx_resolve.key.id(),
+                            &mut ctx_resolve.search,
+                            policy
+                        ).await {
                             Ok(Some((ip, _))) => {
                                 log::debug!(
                                     target: TARGET, 
-                                    "-------- Got Overlay node {} IP: {}, key: {}", 
-                                    key.id(), ip, 
-                                    base64::encode(key.pub_key().unwrap_or(&[0u8; 32]))
+                                    "-------- Overlay nodes search, resolved {} IP: {}, key: {}",
+                                    ctx_resolve.key.id(), ip, 
+                                    base64::encode(ctx_resolve.key.pub_key().unwrap_or(&[0u8; 32]))
                                 );
-                                wait.respond(Some((Some(ip), node)))
+                                wait.respond(Some((Some(ip), ctx_resolve)))
                             },
                             Ok(None) => {
                                 log::trace!(
                                     target: TARGET, 
-                                    "-------- Overlay node {} not found", 
-                                    key.id()
+                                    "-------- Overlay nodes search, {} not resolved", 
+                                    ctx_resolve.key.id()
                                 );
-                                wait.respond(Some((None, node))) 
+                                wait.respond(Some((None, ctx_resolve))) 
                             },
                             Err(e) => {
-                                log::trace!(
+                                log::debug!(
                                     target: TARGET, 
-                                    "-------- Overlay node {} cannnot be found: {}", 
-                                    key.id(),
-                                    e
+                                    "-------- Overlay nodes search, cannot resolve {}: {}", 
+                                    ctx_resolve.key.id(), e
                                 );
-                                wait.respond(Some((None, node))) 
+                                wait.respond(Some((None, ctx_resolve))) 
                             }
                         }
                     }
                 );
+                if reqs >= limit as usize {
+                    break
+                }
             }
             loop {  
                 match wait.wait(&mut queue_reader, false).await { 
-                    Some(Some((None, node))) => nodes.push(node),
-                    Some(Some((Some(ip), node))) => ret.push((ip, node)),
+                    Some(Some((None, ctx_resolve))) => match &policy {
+                        DhtSearchPolicy::FastSearch(_) => (), 
+                        DhtSearchPolicy::FullSearch(_) => postponed.push_back(ctx_resolve),
+                    },
+                    Some(Some((Some(ip), ctx_resolve))) => {
+                        if ctx_search.stored.put(ctx_resolve.key.id().clone())? {
+                            ret.push((ip, ctx_resolve.node));
+                        }
+                    },
                     _ => break
                 }
             }
+            log::debug!(
+                target: TARGET, 
+                "-------- Overlay nodes search, so far resolved {} nodes", 
+                ret.len()
+            );
             if !ret.is_empty() {
                 // Found some
                 break
@@ -521,10 +679,11 @@ impl DhtNode {
                 break
             }
         }
-        log::trace!(
+        ctx_search.search.append(&mut postponed);
+        log::debug!(
             target: TARGET, 
-            "-------- Overlay nodes to return: {}", 
-            ret.len()
+            "-------- Overlay nodes search, {} nodes yet to resolve", 
+            ctx_search.search.len()
         );
         Ok(ret)
     }
@@ -742,47 +901,51 @@ impl DhtNode {
 
     async fn find_value(
         dht: &Arc<Self>, 
-        key: DhtKey, 
+        key_id: &Arc<DhtKeyId>, 
         check: impl Fn(&TLObject) -> bool + Copy + Send + 'static,
+        policy: &DhtSearchPolicy,
         all: bool,
         iter_opt: &mut Option<DhtIterator>
     ) -> Result<Vec<(DhtKeyDescription, TLObject)>> {
-        let key = hash(key)?;
-        let iter = iter_opt.get_or_insert_with(||DhtIterator::with_key_id(dht, key));
-        if iter.key_id != key {
+        let iter = iter_opt.get_or_insert_with(||DhtIterator::with_key_id(dht, key_id.clone()));
+        if &iter.key_id != key_id {
             fail!("INTERNAL ERROR: DHT key mismatch in value search")
         }
         let mut ret = Vec::new();
         let query = TaggedTlObject {
             object: TLObject::new(
                 FindValue { 
-                    key: UInt256::with_array(key),
+                    key: UInt256::from_slice(&key_id[..]),
                     k: 6 
                 }
             ),
             #[cfg(feature = "telemetry")]
             tag: dht.tag_find_value
         };
-        let key = Arc::new(key); 
+        let key_dumper = DhtKeyIdDumper::with_params(log::Level::Debug, key_id);
         let query = Arc::new(query);
         let (wait, mut queue_reader) = Wait::new();  
         let mut known_peers = dht.known_peers.count();
         log::debug!(
             target: TARGET, 
             "FindValue with DHT key ID {} query, {}", 
-            base64::encode(&key[..]), iter
+            key_dumper, iter
         );
+        let limit = match &policy {
+            DhtSearchPolicy::FastSearch(limit) => *limit,
+            DhtSearchPolicy::FullSearch(limit) => *limit
+        } as usize;
         loop {
             while let Some((_, peer)) = iter.order.pop() {
                 let dht_cloned = dht.clone();
-                let key = key.clone();  
+                let key_id = key_id.clone();
                 let peer = peer.clone(); 
                 let query = query.clone(); 
                 let wait = wait.clone(); 
-                let reqs = wait.request(); 
+                let reqs = wait.request_immediate(); 
                 tokio::spawn(
                     async move {
-                        match dht_cloned.value_query(&peer, &query, &key, check).await {
+                        match dht_cloned.value_query(&peer, &query, &key_id, check).await {
                             Ok(found) => wait.respond(found),
                             Err(e) => {
                                 log::warn!(target: TARGET, "ERROR: {}", e);
@@ -791,16 +954,19 @@ impl DhtNode {
                         } 
                     } 
                 );
-                if reqs >= Self::MAX_TASKS {
+                if reqs >= limit {
                     break;
                 } 
             } 
             log::debug!(
                 target: TARGET, 
                 "FindValue with DHT key ID {} query, {} parallel reqs, {}", 
-                base64::encode(&key[..]), wait.count(), iter
+                key_dumper, wait.count(), iter
             );
-            let mut finished = false; 
+            let mut finished = match &policy {
+                DhtSearchPolicy::FastSearch(_) => true,
+                DhtSearchPolicy::FullSearch(_) => false
+            };
             loop {
                 match wait.wait(&mut queue_reader, !all).await { 
                     Some(None) => (),
@@ -808,7 +974,7 @@ impl DhtNode {
                     None => finished = true
                 }
                 // Update iterator if required
-                if all || ret.is_empty() {
+                if all || ret.is_empty() || finished {
                     let updated_known_peers = dht.known_peers.count();
                     if updated_known_peers != known_peers {
                         iter.update(dht);
@@ -816,12 +982,12 @@ impl DhtNode {
                     }
                 }
                 // Add more tasks if required 
-                if !all || (ret.len() < Self::MAX_TASKS) || finished {
+                if !all || (ret.len() < limit) || finished {
                     break
                 }
             }
             // Stop if possible 
-            if (all && (ret.len() >= Self::MAX_TASKS)) || (!all && !ret.is_empty()) || finished {
+            if (all && (ret.len() >= limit)) || (!all && !ret.is_empty()) || finished {
                 break
             } 
         }
@@ -1169,6 +1335,7 @@ impl DhtNode {
         check_all: bool,
         check_vals: impl Fn(Vec<(DhtKeyDescription, TLObject)>) -> Result<bool>
     ) -> Result<bool> {
+        let key_id = Arc::new(hash(key)?);
         let query = TaggedTlObject {
             object: TLObject::new(
                 Store {
@@ -1179,6 +1346,7 @@ impl DhtNode {
             tag: dht.tag_store
         };
         let query = Arc::new(query);
+        let policy = DhtSearchPolicy::FullSearch(Self::MAX_TASKS);
         let mut iter = None;
         let mut peer = dht.get_known_peer(&mut iter);
         while peer.is_some() {
@@ -1219,8 +1387,9 @@ impl DhtNode {
             }
             let vals = DhtNode::find_value(
                 dht, 
-                key.clone(), 
-                check_type, 
+                &key_id, 
+                check_type,
+                &policy, 
                 check_all, 
                 &mut None
             ).await?;
