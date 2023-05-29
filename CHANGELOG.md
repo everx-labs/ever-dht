@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## Version 0.5.202
+
+- DHT performance optimization
+- Overlay node search with iterations
+- Increase package version greatly
+- Fix build due to broken dependencies
+- Adjust some comments
+- Support for different DHT search policies
+
 ## Version 0.5.187
 
 - Use global config to verify on mainnet
