@@ -3,7 +3,7 @@ build = './common/build/build.rs'
 description = 'DHT protocol library'
 edition = '2021'
 name = 'dht'
-version = '0.5.208'
+version = '0.6.0'
 
 [dependencies]
 async-trait = '0.1'
