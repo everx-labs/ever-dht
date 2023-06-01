@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## Version 0.6.0
+
+- Adapt to rare cases when DHT network may fail fast query at first time
+- Increase package version
+
 ## Version 0.5.202
 
 - DHT performance optimization
