@@ -2,6 +2,10 @@
 
 All notable changes to this project will be documented in this file.
 
+## Version 0.6.5
+
+- Use externally configured port
+
 ## Version 0.6.0
 
 - Adapt to rare cases when DHT network may fail fast query at first time

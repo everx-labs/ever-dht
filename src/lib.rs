@@ -25,7 +25,7 @@ use ever_crypto::{Ed25519KeyOption, KeyId, KeyOption};
 use overlay::{OverlayId, OverlayShortId, OverlayUtils};
 use rand::Rng;
 use std::{
-    collections::VecDeque, convert::TryInto, fmt::{self, Display, Formatter}, mem, 
+    collections::VecDeque, fmt::{self, Display, Formatter}, mem, 
     ops::Deref, sync::{Arc, atomic::{AtomicU8, AtomicU64, Ordering}}
 };
 #[cfg(feature = "telemetry")]
@@ -34,7 +34,7 @@ use ton_api::{
     IntoBoxed, deserialize_boxed, serialize_boxed, serialize_boxed_inplace,
     ton::{
         self, PublicKey, TLObject, 
-        adnl::{AddressList as AddressListBoxed, addresslist::AddressList}, 
+        adnl::AddressList as AddressListBoxed, 
         dht::{
             Node as NodeBoxed, Nodes as NodesBoxed, Pong as DhtPongBoxed, Stored, UpdateRule,
             ValueResult as DhtValueResult,
@@ -45,7 +45,7 @@ use ton_api::{
         overlay::{
             Nodes as OverlayNodesBoxed, node::Node as OverlayNode, nodes::Nodes as OverlayNodes
         }, 
-        pub_::publickey::{Ed25519, Overlay},
+        pub_::publickey::Overlay,
         rpc::dht::{
             FindNode, FindValue, GetSignedAddressList, Ping as DhtPing, Query as DhtQuery, 
             Store
@@ -87,41 +87,6 @@ macro_rules! verify {
             data.only()
         }
     }
-}
-
-pub fn build_dht_node_info_with_timestamp(
-    ip: &str, 
-    key: &str, 
-    signature: &str,
-    timestamp: Option<i32>
-) -> Result<Node> {
-    let key = base64::decode(key)?;
-    if key.len() != 32 {
-        fail!("Bad public key length")
-    }
-    let key: [u8; 32] = key.as_slice().try_into()?;
-    let addrs = vec![IpAddress::from_versioned_string(ip, None)?.into_udp().into_boxed()];
-    let signature = base64::decode(signature)?;
-    let node = Node {
-        id: Ed25519 {
-            key: UInt256::with_array(key)
-        }.into_boxed(),
-        addr_list: AddressList {
-            addrs: addrs.into(),
-            version: timestamp.unwrap_or(0),
-            reinit_date: timestamp.unwrap_or(0),
-            priority: 0,
-            expire_at: 0
-        },
-        version: timestamp.unwrap_or(-1),
-        signature: ton::bytes(signature)
-    };
-    Ok(node)
-}
-
-#[deprecated(note = "Use build_dht_node_info_with_timestamp")]
-pub fn build_dht_node_info(ip: &str, key: &str, signature: &str) -> Result<Node> {
-    build_dht_node_info_with_timestamp(ip, key, signature, None)
 }
 
 pub struct DhtIterator {
@@ -1552,4 +1517,3 @@ impl Subscriber for DhtNode {
     }    
 
 }
-
