@@ -3,7 +3,7 @@ build = './common/build/build.rs'
 description = 'DHT protocol library'
 edition = '2021'
 name = 'dht'
-version = '0.6.6'
+version = '0.6.7'
 
 [dependencies]
 async-trait = '0.1'
@@ -18,7 +18,7 @@ ever-crypto = { git = 'https://github.com/tonlabs/ever-crypto.git', tag = '0.1.1
 external-ip = { optional = true, version = '4.1' }
 lockfree = { git = 'https://github.com/tonlabs/lockfree.git' }
 log4rs = { optional = true, version = '1.2' }
-overlay = { git = 'https://github.com/tonlabs/ever-overlay.git', tag = '0.6.186' }
+overlay = { git = 'https://github.com/tonlabs/ever-overlay.git', tag = '0.6.187' }
 rldp = { git = 'https://github.com/tonlabs/ever-rldp.git', optional = true, tag = '0.7.183' }
 serde_json = { optional = true, version = '1.0' }
 tokio = { features = [ 'rt-multi-thread' ], version = '1.5' }
