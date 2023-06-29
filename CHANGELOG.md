@@ -2,6 +2,10 @@
 
 All notable changes to this project will be documented in this file.
 
+## Version 0.6.20
+
+- Small fixes for pipeline
+
 ## Version 0.6.5
 
 - Use externally configured port
