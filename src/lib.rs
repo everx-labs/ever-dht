@@ -21,19 +21,18 @@ use adnl::{
 };
 #[cfg(feature = "telemetry")]
 use adnl::telemetry::Metric;
-use ever_crypto::{Ed25519KeyOption, KeyId, KeyOption};
 use overlay::{OverlayId, OverlayShortId, OverlayUtils};
 use rand::Rng;
 use std::{
-    collections::VecDeque, fmt::{self, Display, Formatter}, mem, 
-    ops::Deref, sync::{Arc, atomic::{AtomicU8, AtomicU64, Ordering}}
+    collections::VecDeque, convert::TryInto, fmt::{self, Display, Formatter}, 
+    sync::{Arc, atomic::{AtomicU8, AtomicU64, Ordering}}
 };
 #[cfg(feature = "telemetry")]
 use std::time::Instant;
 use ton_api::{
-    IntoBoxed, deserialize_boxed, serialize_boxed, serialize_boxed_inplace,
+    deserialize_boxed, IntoBoxed, serialize_boxed, serialize_boxed_inplace, Signing,
     ton::{
-        self, PublicKey, TLObject, 
+        PublicKey, TLObject, 
         adnl::AddressList as AddressListBoxed, 
         dht::{
             Node as NodeBoxed, Nodes as NodesBoxed, Pong as DhtPongBoxed, Stored, UpdateRule,
@@ -54,40 +53,11 @@ use ton_api::{
 };
 #[cfg(feature = "telemetry")]
 use ton_api::tag_from_boxed_type;
-use ton_types::{error, fail, Result, UInt256};
+use ton_types::{error, fail, base64_encode, KeyId, KeyOption, Result, UInt256};
 
 include!("../common/src/info.rs");
 
 pub const TARGET: &str = "dht";
-
-#[macro_export]
-macro_rules! sign {
-    ($data:expr, $key:expr) => {
-        {
-            let data = $data.into_boxed();
-            let mut buf = serialize_boxed(&data)?;
-            let signature = $key.sign(&buf)?;
-            buf.truncate(0);
-            buf.extend_from_slice(&signature);
-            let mut data = data.only();
-            data.signature.0 = buf;
-            data
-        }
-    }
-}
-
-#[macro_export]
-macro_rules! verify {
-    ($data:expr, $key:ident) => {
-        {
-            let signature = mem::take(&mut $data.signature.0);
-            let data = $data.into_boxed();
-            let buf = serialize_boxed(&data)?;
-            $key.verify(&buf[..], &signature[..])?;
-            data.only()
-        }
-    }
-}
 
 pub struct DhtIterator {
     iter: Option<AddressCacheIterator>, 
@@ -149,7 +119,7 @@ impl DhtIterator {
             self.order.drain(0..drop_to);
         }
         if log::log_enabled!(log::Level::Debug) {
-            let mut out = format!("DHT search list for {}:\n", base64::encode(&self.key_id[..]));
+            let mut out = format!("DHT search list for {}:\n", base64_encode(&self.key_id[..]));
             for (affinity, key_id) in self.order.iter().rev() {
                 out.push_str(format!("order {} - {}\n", affinity, key_id).as_str())
             }
@@ -178,7 +148,7 @@ struct DhtKeyIdDumper {
 impl DhtKeyIdDumper {
     fn with_params(level: log::Level, src: &DhtKeyId) -> Self {
         let dump = if log::log_enabled!(level) {
-            Some(base64::encode(src))
+            Some(base64_encode(src))
         } else {
             None
         };
@@ -335,7 +305,7 @@ impl DhtNode {
         let ret = self.adnl.add_peer(
             self.node_key.id(), 
             &addr, 
-            &Ed25519KeyOption::from_public_key_tl(&peer.id)?
+            &((&peer.id).try_into()?)
         )?;
         let ret = if let Some(ret) = ret {
             ret
@@ -399,7 +369,7 @@ impl DhtNode {
         };        
         let src = answer.only().nodes;
         log::debug!(target: TARGET, "-------- Found DHT nodes:");
-        for node in src.deref() {
+        for node in src.iter() {
             log::debug!(target: TARGET, "{:?}", node);
             self.add_peer(node)?; 
         }
@@ -414,7 +384,7 @@ impl DhtNode {
         let key = Self::dht_key_from_key_id(key_id, "address");
         let value = self.search_dht_key(&hash(key)?);
         if let Some(value) = value {
-            let object = deserialize_boxed(&value.value.0)?;
+            let object = deserialize_boxed(&value.value)?;
             Ok(Some(Self::parse_value_as_address(value.key, object)?))
         } else {
             Ok(None)
@@ -532,7 +502,7 @@ impl DhtNode {
                 while let Some((_, nodes_list)) = nodes_lists.pop() {
                     if let Ok(nodes_list) = nodes_list.downcast::<OverlayNodesBoxed>() {
                         for node in nodes_list.only().nodes.0 {
-                            let key = Ed25519KeyOption::from_public_key_tl(&node.id)?;
+                            let key: Arc<dyn KeyOption> = (&node.id).try_into()?;
                             ctx_search.search.push_back(
                                 OverlayNodeResolveContext {
                                     node,
@@ -589,7 +559,7 @@ impl DhtNode {
                                     target: TARGET, 
                                     "-------- Overlay nodes search, resolved {} IP: {}, key: {}",
                                     ctx_resolve.key.id(), ip, 
-                                    base64::encode(ctx_resolve.key.pub_key().unwrap_or(&[0u8; 32]))
+                                    base64_encode(ctx_resolve.key.pub_key().unwrap_or(&[0u8; 32]))
                                 );
                                 wait.respond(Some((Some(ip), ctx_resolve)))
                             },
@@ -754,10 +724,10 @@ impl DhtNode {
             || error!("INTERNAL ERROR: cannot parse generated address list")
         )?;
         let value = serialize_boxed(&addr_list.into_boxed())?;
-        let value = Self::sign_value("address", &value[..], key)?;
+        let value = Self::sign_value("address", value, key)?;
         let key = Self::dht_key_from_key_id(key.id(), "address");
         let key_id = hash(key.clone())?;
-        log::debug!(target: TARGET, "Storing DHT key ID {}", base64::encode(&key_id[..]));
+        log::debug!(target: TARGET, "Storing DHT key ID {}", base64_encode(&key_id[..]));
         dht.process_store_signed_value(key_id, value.clone())?;
         Self::store_value(
             dht,
@@ -770,7 +740,7 @@ impl DhtNode {
                     if let Ok(addr_list) = object.downcast::<AddressListBoxed>() {
                         let addr_list = addr_list.only();
                         if let Some(ip) = AdnlNode::parse_address_list(&addr_list)? {
-                            if &ip == &addr { //dht.adnl.ip_address() {
+                            if ip == addr { //dht.adnl.ip_address() {
                                 log::debug!(target: TARGET, "Checked stored address {:?}", ip);
                                 return Ok(true);
                             } else {
@@ -805,7 +775,7 @@ impl DhtNode {
     ) -> Result<bool> {
         log::debug!(target: TARGET, "Storing overlay node {:?}", node);
         let overlay_id = Overlay {
-            name: ton::bytes(overlay_id.to_vec())
+            name: overlay_id.to_vec().into()
         };
         let overlay_short_id = OverlayShortId::from_data(hash(overlay_id.clone())?);
         OverlayUtils::verify_node(&overlay_short_id, node)?;
@@ -817,12 +787,12 @@ impl DhtNode {
             key: DhtKeyDescription {
                 id: overlay_id.into_boxed(),
                 key: key.clone(),
-                signature: ton::bytes::default(),
+                signature: Default::default(),
                 update_rule: UpdateRule::Dht_UpdateRule_OverlayNodes
             },
             ttl: Version::get() + Self::TIMEOUT_VALUE,
-            signature: ton::bytes::default(),
-            value: ton::bytes(serialize_boxed(&nodes)?)
+            signature: Default::default(),
+            value: serialize_boxed(&nodes)?.into()
         };
         dht.process_store_overlay_nodes(hash(key.clone())?, value.clone())?;
         Self::store_value(
@@ -860,7 +830,7 @@ impl DhtNode {
         DhtKey {
             id: UInt256::with_array(*id.data()),
             idx: 0,
-            name: ton::bytes(name.as_bytes().to_vec())
+            name: name.as_bytes().to_vec().into()
         }
     }
 
@@ -988,8 +958,7 @@ impl DhtNode {
             let ip_address = AdnlNode::parse_address_list(&addr_list.only())?.ok_or_else(
                 || error!("Wrong address list in DHT search")
             )?;
-            let key = Ed25519KeyOption::from_public_key_tl(&key.id)?;
-            Ok((ip_address, key))
+            Ok((ip_address, (&key.id).try_into()?))
         } else {
             fail!("Address list type mismatch in DHT search")
         }
@@ -1062,7 +1031,7 @@ impl DhtNode {
     fn process_store(&self, query: Store) -> Result<Stored> {
         let dht_key_id = hash(query.value.key.key.clone())?;
         if query.value.ttl <= Version::get() {
-            fail!("Ignore expired DHT value with key {}", base64::encode(&dht_key_id))
+            fail!("Ignore expired DHT value with key {}", base64_encode(&dht_key_id))
         }
         match query.value.key.update_rule {
             UpdateRule::Dht_UpdateRule_Signature => 
@@ -1076,10 +1045,10 @@ impl DhtNode {
 
     fn process_store_overlay_nodes(&self, dht_key_id: DhtKeyId, value: DhtValue) -> Result<bool> {
         log::trace!(target: TARGET, "Process Store Overlay Nodes {:?}", value);
-        if !value.signature.deref().is_empty() {
+        if !value.signature.is_empty() {
             fail!("Wrong value signature for OverlayNodes")
         }
-        if !value.key.signature.deref().is_empty() {
+        if !value.key.signature.is_empty() {
             fail!("Wrong key signature for OverlayNodes")
         }
         let overlay_short_id = match value.key.id {
@@ -1149,15 +1118,18 @@ impl DhtNode {
                 self.telemetry.values.update(
                     self.allocated.values.load(Ordering::Relaxed)
                 );
-                ret.object.value = ton::bytes(serialize_boxed(&nodes)?);
+                ret.object.value = serialize_boxed(&nodes)?.into();
                 log::trace!(target: TARGET, "Store Overlay Nodes result {:?}", ret.object);
                 Ok(Some(ret))
             }
         )
     }
 
-    fn process_store_signed_value(&self, dht_key_id: DhtKeyId, value: DhtValue) -> Result<bool> {
-        self.verify_value(&value)?;
+    fn process_store_signed_value(
+        &self, dht_key_id: DhtKeyId, 
+        mut value: DhtValue
+    ) -> Result<bool> {
+        self.verify_value(&mut value)?;
         add_counted_object_to_map_with_update(
             &self.storage,
             dht_key_id, 
@@ -1264,32 +1236,32 @@ impl DhtNode {
     
     fn sign_key_description(name: &str, key: &Arc<dyn KeyOption>) -> Result<DhtKeyDescription> {
         let key_description = DhtKeyDescription {
-            id: key.into_public_key_tl()?,
+            id: key.try_into()?,
             key: Self::dht_key_from_key_id(key.id(), name),
-            signature: ton::bytes::default(),
+            signature: Default::default(),
             update_rule: UpdateRule::Dht_UpdateRule_Signature
         };
-        Ok(sign!(key_description, key))
+        key_description.sign(key)
     }    
 
     fn sign_local_node(&self) -> Result<Node> {
         let local_node = Node {
-            id: self.node_key.into_public_key_tl()?,
+            id: (&self.node_key).try_into()?,
             addr_list: self.adnl.build_address_list(None)?,
-            signature: ton::bytes::default(),
+            signature: Default::default(),
             version: Version::get()
         };
-        Ok(sign!(local_node, self.node_key))
+        local_node.sign(&self.node_key)
     }
 
-    fn sign_value(name: &str, value: &[u8], key: &Arc<dyn KeyOption>) -> Result<DhtValue> {
+    fn sign_value(name: &str, value: Vec<u8>, key: &Arc<dyn KeyOption>) -> Result<DhtValue> {
         let value = DhtValue {
             key: Self::sign_key_description(name, key)?,
             ttl: Version::get() + Self::TIMEOUT_VALUE,
-            signature: ton::bytes::default(),
-            value: ton::bytes(value.to_vec())
+            signature: Default::default(),
+            value: value.into()
         };
-        Ok(sign!(value, key))
+        value.sign(key)
     }
 
     async fn store_value(
@@ -1382,9 +1354,9 @@ impl DhtNode {
                     log::debug!(
                         target: TARGET, 
                         "Found value for DHT key ID {}: {:?}/{:?}", 
-                        base64::encode(&key[..]), value.key, value.value
+                        base64_encode(&key[..]), value.key, value.value
                     );
-                    let object = deserialize_boxed(&value.value.0)?;
+                    let object = deserialize_boxed(&value.value)?;
                     if check(&object) {
                         return Ok(Some((value.key, object)))
                     } 
@@ -1399,7 +1371,7 @@ impl DhtNode {
                     log::debug!(
                         target: TARGET, 
                         "Value not found on {} for DHT key ID {}, suggested {} other nodes",
-                        peer, base64::encode(&key[..]), nodes.len()
+                        peer, base64_encode(&key[..]), nodes.len()
                     );
                     for node in nodes.iter() {          
                         self.add_peer(node)?;
@@ -1410,26 +1382,22 @@ impl DhtNode {
             log::debug!(
                 target: TARGET, 
                 "No answer from {} to FindValue with DHT key ID {} query", 
-                peer, base64::encode(&key[..])
+                peer, base64_encode(&key[..])
             );
         }
         Ok(None) 
     }
 
     fn verify_other_node(&self, node: &Node) -> Result<()> {
-        let other_key = Ed25519KeyOption::from_public_key_tl(&node.id)?;
+        let other_key: Arc<dyn KeyOption> = (&node.id).try_into()?;
         let mut node = node.clone();
-        verify!(node, other_key);
-        Ok(())
+        node.verify(&other_key)
     }
 
-    fn verify_value(&self, value: &DhtValue) -> Result<()> {
-        let other_key = Ed25519KeyOption::from_public_key_tl(&value.key.id)?;
-        let mut key = value.key.clone();
-        verify!(key, other_key);
-        let mut value = value.clone();
-        verify!(value, other_key);
-        Ok(())
+    fn verify_value(&self, value: &mut DhtValue) -> Result<()> {
+        let other_key: Arc<dyn KeyOption> = (&value.key.id).try_into()?;
+        value.verify(&other_key)?;
+        value.key.verify(&other_key)
     }
 
 }
