@@ -12,16 +12,16 @@ failure = '0.1'
 hex = '0.4'
 log = '0.4'
 rand = '0.8'
-adnl = { features = [ 'node' ], git = 'https://github.com/tonlabs/ever-adnl.git', tag = '0.9.1' }
+adnl = { features = [ 'node' ], git = 'ssh://git@github.com/tonlabs/ever-adnl.git', tag = 'pre_ci-test-publish' }
 external-ip = { optional = true, version = '4.1' }
 lockfree = { git = 'https://github.com/tonlabs/lockfree.git' }
 log4rs = { optional = true, version = '1.2' }
-overlay = { git = 'https://github.com/tonlabs/ever-overlay.git', tag = '0.6.240' }
-rldp = { git = 'https://github.com/tonlabs/ever-rldp.git', optional = true, tag = '0.7.232' }
+overlay = { git = 'ssh://git@github.com/tonlabs/ever-overlay.git', tag = 'pre_ci-test-publish' }
+rldp = { git = 'ssh://git@github.com/tonlabs/ever-rldp.git', optional = true, tag = 'pre_ci-test-publish' }
 serde_json = { optional = true, version = '1.0' }
 tokio = { features = [ 'rt-multi-thread' ], version = '1.5' }
-ton_api = { git = 'https://github.com/tonlabs/ever-tl.git', package = 'ton_api', tag = '0.3.41' }
-ton_types = { git = 'https://github.com/tonlabs/ever-types.git', tag = '2.0.28' }
+ton_api = { git = 'ssh://git@github.com/tonlabs/ever-tl.git', package = 'ton_api', tag = 'pre_ci-test-publish' }
+ton_types = { git = 'ssh://git@github.com/tonlabs/ever-types.git', tag = 'pre_ci-test-publish' }
 
 [features]
 telemetry = [ 'adnl/telemetry', 'overlay/telemetry' ]
