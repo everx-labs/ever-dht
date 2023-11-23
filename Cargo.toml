@@ -3,7 +3,7 @@ build = './common/build/build.rs'
 description = 'DHT protocol library'
 edition = '2021'
 name = 'dht'
-version = '0.6.69'
+version = '0.6.70'
 
 [dependencies]
 async-trait = '0.1'
@@ -12,12 +12,12 @@ failure = '0.1'
 hex = '0.4'
 log = '0.4'
 rand = '0.8'
-adnl = { features = [ 'node' ], git = 'https://github.com/tonlabs/ever-adnl.git', tag = '0.9.8' }
+adnl = { features = [ 'node' ], git = 'https://github.com/tonlabs/ever-adnl.git', tag = '0.9.9' }
 external-ip = { optional = true, version = '4.1' }
 lockfree = { git = 'https://github.com/tonlabs/lockfree.git' }
 log4rs = { optional = true, version = '1.2' }
-overlay = { git = 'https://github.com/tonlabs/ever-overlay.git', tag = '0.7.1' }
-rldp = { git = 'https://github.com/tonlabs/ever-rldp.git', optional = true, tag = '0.7.239' }
+overlay = { git = 'https://github.com/tonlabs/ever-overlay.git', tag = '0.7.3' }
+rldp = { git = 'https://github.com/tonlabs/ever-rldp.git', optional = true, tag = '0.8.1' }
 serde_json = { optional = true, version = '1.0' }
 tokio = { features = [ 'rt-multi-thread' ], version = '1.5' }
 ton_api = { git = 'https://github.com/tonlabs/ever-tl.git', package = 'ton_api', tag = '0.3.48' }
