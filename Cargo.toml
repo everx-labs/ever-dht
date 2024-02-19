@@ -17,7 +17,7 @@ lockfree = { git = 'https://github.com/tonlabs/lockfree.git' }
 overlay = { git = 'https://github.com/tonlabs/ever-overlay.git', tag = 'pre_feature-common-message' }
 tokio = { features = [ 'rt-multi-thread' ], version = '1.5' }
 ton_api = { git = 'https://github.com/tonlabs/ever-tl.git', package = 'ton_api', tag = 'pre_feature-common-message' }
-ton_types = { git = 'https://github.com/tonlabs/ever-types.git', tag = 'pre_feature-common-message' }
+ton_types = { git = 'https://github.com/tonlabs/ever-types.git', tag = 'pre_feature-common-message', features = ['export_key'] }
 
 [features]
 telemetry = [ 'adnl/telemetry', 'overlay/telemetry' ]
