@@ -2,6 +2,10 @@
 
 All notable changes to this project will be documented in this file.
 
+## Version 0.7.2
+
+- Rebranding ton -> everx
+
 ## Version 0.7.0
 
 - Multi-network DHT
