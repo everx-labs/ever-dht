@@ -2,6 +2,10 @@
 
 All notable changes to this project will be documented in this file.
 
+## Version 0.7.0
+
+- Multi-network DHT
+
 ## Version 0.6.56
 
 - Support hops check for old-fashioned broadcasts
