@@ -3,7 +3,7 @@ build = './common/build/build.rs'
 description = 'DHT protocol library'
 edition = '2021'
 name = 'dht'
-version = '0.7.2'
+version = '0.7.3'
 
 [dependencies]
 async-trait = '0.1'
@@ -21,4 +21,7 @@ ton_types = { features = [ 'export_key' ], git = 'https://github.com/tonlabs/eve
 
 [features]
 telemetry = [ 'adnl/telemetry', 'overlay/telemetry' ]
+
+[lib]
+path = 'src/dhtlib.rs'
 
