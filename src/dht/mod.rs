@@ -63,8 +63,6 @@ use ever_types::{
     Result, UInt256
 };
 
-include!("../common/src/info.rs");
-
 pub const TARGET: &str = "dht";
 
 pub struct DhtIterator {
