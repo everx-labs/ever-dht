@@ -1,3 +1,7 @@
+# WARNING! This repository is obsolete
+
+DHT protocol implementation was merged into the repository https://github.com/tonlabs/ever-adnl.git
+
 # DHT
 
 DHT protocol implementation
